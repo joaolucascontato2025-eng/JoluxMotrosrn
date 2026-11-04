@@ -1733,7 +1733,7 @@ Mensagem:
 ${kt}
 
 ---
-Origem: Site JOLUX MOTORS`;f(`Seu email padrão será aberto com a mensagem para ${m.email_contato}`),setTimeout(()=>{try{let te=encodeURIComponent(Kc),Un=encodeURIComponent(Fc);window.location.href=`mailto:${m.email_contato}?subject=${te}&body=${Un}`}catch{}},400),VA({nome:De,whatsapp:Ie,email:It,telefone:Ie,interesse:$r,mensagem:kt,lgpd:!1,vehicle_id:Bn,origem:Ku})}catch(B){f("Erro ao preparar mensagem - tente novamente.")}}function kc(){let B=`Ola JOLUX MOTORS! Sou ${M.nome||"Interessado"}. ${M.mensagem?`Mensagem: ${M.mensagem}`:""} ${M.interesse?`Interesse: ${M.interesse}`:""}`.trim();try{let z=(m.whatsapp||"(84) 99999-9999").replace(/\D/g,""),$=z.startsWith("55")?z:`55${z}`;window.open(`https://wa.me/${$}?text=${encodeURIComponent(B)}`,"_blank")}catch{}}function ku(c){try{let B=encodeURIComponent(`Novo contato JOLUX MOTORS - ${c.nome}`),z=encodeURIComponent(`Nome: ${c.nome}
+Origem: Site JOLUX MOTORS`;f("Enviando..."),fetch("https://api.web3forms.com/submit",{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify({access_key:"8f7fe0b1-d9c6-4a5e-b1cd-ecefdf2b2140",subject:Kc,from_name:De,email:It||m.email_contato,name:De,message:Fc,whatsapp:Ie})}).then(async r=>{let j=await r.json().catch(()=>({}));if(r.ok&&j.success!==false){f("Mensagem enviada! Em breve entraremos em contato.")}else{f("Erro ao enviar: "+(j.message||"tente novamente"))}}).catch(()=>{f("Erro de conexão. Fale pelo WhatsApp: "+m.whatsapp)}),VA({nome:De,whatsapp:Ie,email:It,telefone:Ie,interesse:$r,mensagem:kt,lgpd:!1,vehicle_id:Bn,origem:Ku})}catch(B){f("Erro ao preparar mensagem - tente novamente.")}}function kc(){let B=`Ola JOLUX MOTORS! Sou ${M.nome||"Interessado"}. ${M.mensagem?`Mensagem: ${M.mensagem}`:""} ${M.interesse?`Interesse: ${M.interesse}`:""}`.trim();try{let z=(m.whatsapp||"(84) 99999-9999").replace(/\D/g,""),$=z.startsWith("55")?z:`55${z}`;window.open(`https://wa.me/${$}?text=${encodeURIComponent(B)}`,"_blank")}catch{}}function ku(c){try{let B=`Novo contato JOLUX MOTORS - ${c.nome}`,z=`Nome: ${c.nome}
 WhatsApp: ${c.whatsapp}
 Email: ${c.email}
 Interesse: ${c.interesse}
@@ -1741,9 +1741,7 @@ Veículo: ${c.vehicle_id||"contato geral"}
 Origem: ${c.origem}
 
 Mensagem:
-${c.mensagem}
-
-Destino: ${m.email_contato}`);window.open(`mailto:${m.email_contato}?subject=${B}&body=${z}`,"_blank")}catch{}}let Ru=A.startsWith("admin"),eA=Bt[0]||null;return g("div",{className:"min-h-screen bg-white text-black",style:{fontFamily:"'Inter', system-ui, sans-serif"},children:[a("style",{children:`
+${c.mensagem}`;f("Enviando..."),fetch("https://api.web3forms.com/submit",{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify({access_key:"8f7fe0b1-d9c6-4a5e-b1cd-ecefdf2b2140",subject:B,from_name:c.nome,email:c.email||m.email_contato,name:c.nome,message:z,whatsapp:c.whatsapp})}).then(async r=>{let j=await r.json().catch(()=>({}));f(r.ok&&j.success!==false?"Email enviado!":"Erro ao enviar: "+(j.message||"tente novamente"))}).catch(()=>{f("Erro de conexão.")})}catch{}}let Ru=A.startsWith("admin"),eA=Bt[0]||null;return g("div",{className:"min-h-screen bg-white text-black",style:{fontFamily:"'Inter', system-ui, sans-serif"},children:[a("style",{children:`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Montserrat:wght@800;700;600&display=swap');
         :root { --gold: ${ag}; --border: #EEEEEE; --bg: #FFFFFF; }
         * { border-color: var(--border); }
