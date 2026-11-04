@@ -107,7 +107,7 @@ async function loadProfile(){
   const{data}=await sb.from('profiles').select('*').eq('id',S.user.id).maybeSingle();S.profile=data}
 
 /* ---------- layout ---------- */
-const mark=()=>`<img src="${esc(S.cfg.logo_url||'fotos/logo.png')}" alt="VANTA MOTORS" onerror="this.outerHTML='&lt;span class=vmark&gt;V&lt;/span&gt;'">`;
+const mark=()=>`<img src="${esc(S.cfg.logo_url||'fotos/logo.png')}" alt="VANTA MOTORS" onerror="this.outerHTML='&lt;span class=vmark&gt;V&lt;/span&gt;'">`:
 function header(){
   const p=S.page,a=(h,t)=>`<a href="#${h}" class="${p===h?'on':''}">${t}</a>`;
   $('#hdr').innerHTML=`<header><div class="w bar"><a class="logo" href="#inicio" title="Voltar ao início">${mark()}<span><b>VANTA</b><small>MOTORS</small></span></a>
