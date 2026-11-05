@@ -1,0 +1,1084 @@
+const { useState, useEffect, useMemo } = React;
+
+/* ================= CONFIG ================= */
+const SB_URL = "https://xwnxbafcwdijuzlutrzg.supabase.co";
+const SB_KEY = "sb_publishable_yOPkmQUDMUO7H58BxBg4CA_RXYfZ-dp";
+const SUPABASE_URL = SB_URL;
+const SUPABASE_KEY = SB_KEY;
+const ADMIN_EMAIL = "joaolucas.contato2025@gmail.com";
+const WEB3_KEY = "8f7fe0b1-d9c6-4a5e-b1cd-ecefdf2b2140";
+// Logo: coloque um arquivo logo.png na mesma pasta do index.html
+// (ou cole aqui o seu "data:image/...;base64,..." antigo)
+const LOGO = "logo.png";
+const GOLD = "#D6B56D";
+const PAGES = ["inicio","catalogo","contato","conta","privacidade","admin-dashboard","admin-veiculos","admin-config","admin-usuarios","admin-leads"];
+const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
+const EMPTY = { tipo:"",condicao:"",marca:"",modelo:"",versao:"",categoria:"",anoFab:"",anoModelo:"",km:"",combustivel:"",cambio:"",cor:"",descricao:"",opcionais:[],anunciante:"",telefone:"",status:"rascunho",fotos:[] };
+const EMPTY_CONTACT = { nome:"",whatsapp:"",email:"",interesse:"",mensagem:"",lgpd:false,vehicle_id:"",origem:"contato" };
+const DEFAULT_CFG = { whatsapp:"(84) 99999-9999", email_contato:"vantamotorsrn@gmail.com" };
+const emptyMsg = "Não temos veículos disponíveis no momento. Novos anúncios serão adicionados em breve.";
+
+/* ================= SUPABASE (banco de dados) ================= */
+// Pega o token do login; renova sozinho quando está perto de expirar.
+async function getToken() {
+  try {
+    const t = JSON.parse(localStorage.getItem("jolux_user") || "null");
+    if (!t || !t.access_token) return null;
+    if (t.expires_at && Date.now() < t.expires_at) return t.access_token;
+    if (!t.refresh_token) return null;
+    const r = await fetch(SB_URL + "/auth/v1/token?grant_type=refresh_token", {
+      method: "POST",
+      headers: { apikey: SB_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: t.refresh_token }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.access_token) return null;
+    const n = { ...t, access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (j.expires_in || 3600) * 1000 - 60000 };
+    localStorage.setItem("jolux_user", JSON.stringify(n));
+    return n.access_token;
+  } catch (e) { return null; }
+}
+// Chamada simples ao banco (REST do Supabase).
+async function sb(path, opts = {}) {
+  const token = await getToken();
+  const headers = { apikey: SB_KEY, "Content-Type": "application/json", Prefer: "return=representation", ...(opts.headers || {}) };
+  if (token) headers.Authorization = "Bearer " + token;
+  const r = await fetch(SB_URL + "/rest/v1" + path, { ...opts, headers });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.message || j.hint)) || "erro " + r.status);
+  return j;
+}
+
+/* ================= FOTOS (Supabase Storage) ================= */
+const BUCKET = "veiculos";
+const MAX_FOTOS = 10;
+// Reduz a foto (máx. 1600px, JPEG) para enviar rápido e gastar pouco espaço.
+function compressImage(file, max = 1600, q = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => { URL.revokeObjectURL(url); b ? resolve(b) : reject(new Error("falha ao processar a imagem")); }, "image/jpeg", q);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("imagem inválida")); };
+    img.src = url;
+  });
+}
+async function uploadFoto(blob) {
+  const token = await getToken();
+  if (!token) throw new Error("entre como admin para enviar fotos");
+  const path = uid() + Date.now().toString(36) + ".jpg";
+  const r = await fetch(SB_URL + "/storage/v1/object/" + BUCKET + "/" + path, {
+    method: "POST",
+    headers: { apikey: SB_KEY, Authorization: "Bearer " + token, "Content-Type": "image/jpeg" },
+    body: blob,
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.message || j.error)) || "erro " + r.status);
+  return SB_URL + "/storage/v1/object/public/" + BUCKET + "/" + path;
+}
+async function deleteFoto(url) {
+  try {
+    const marca = "/object/public/" + BUCKET + "/";
+    const i = String(url).indexOf(marca);
+    if (i < 0) return;
+    const token = await getToken();
+    if (!token) return;
+    await fetch(SB_URL + "/storage/v1/object/" + BUCKET + "/" + String(url).slice(i + marca.length), {
+      method: "DELETE", headers: { apikey: SB_KEY, Authorization: "Bearer " + token },
+    });
+  } catch (e) {}
+}
+
+/* ================= CPF / TELEFONE ================= */
+const onlyDigits = v => String(v || "").replace(/\D/g, "");
+const maskCPF = v => onlyDigits(v).slice(0, 11)
+  .replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+const maskPhone = v => {
+  const d = onlyDigits(v).slice(0, 11);
+  if (!d) return "";
+  if (d.length <= 2) return "(" + d;
+  if (d.length <= 6) return "(" + d.slice(0, 2) + ") " + d.slice(2);
+  if (d.length <= 10) return "(" + d.slice(0, 2) + ") " + d.slice(2, 6) + "-" + d.slice(6);
+  return "(" + d.slice(0, 2) + ") " + d.slice(2, 7) + "-" + d.slice(7);
+};
+function validCPF(v) {
+  const c = onlyDigits(v);
+  if (c.length !== 11 || /^(\d)\1{10}$/.test(c)) return false;
+  for (let t = 9; t < 11; t++) {
+    let sum = 0;
+    for (let i = 0; i < t; i++) sum += Number(c[i]) * (t + 1 - i);
+    if (((sum * 10) % 11) % 10 !== Number(c[t])) return false;
+  }
+  return true;
+}
+
+/* ================= PEQUENOS COMPONENTES ================= */
+function Logo({ size = 36 }) {
+  return (
+    <div className="relative bg-black rounded-lg overflow-hidden flex items-center justify-center shrink-0" style={{ width: size, height: size }}>
+      <span className="mont font-extrabold" style={{ color: GOLD }}>J</span>
+      <img src={LOGO} alt="JOLUX MOTORS" className="absolute inset-0 w-full h-full object-cover" onError={e => (e.currentTarget.style.display = "none")} />
+    </div>
+  );
+}
+function Field({ label, value, onChange, placeholder, required }) {
+  return (
+    <div>
+      <label className="text-[11px] tracking-widest text-neutral-500 uppercase">{label}</label>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        className={"mt-1 w-full h-10 border px-3 text-[13px] rounded-[10px] " + (required ? "border-neutral-300" : "border-[#EEEEEE]")} />
+    </div>
+  );
+}
+function SectionTitle({ title }) {
+  return <div className="text-[11px] tracking-[0.14em] font-semibold text-neutral-700 border-b border-[#EEEEEE] pb-2">{title}</div>;
+}
+function waLink(numero, v) {
+  const n = String(numero || "").replace(/\D/g, "");
+  const full = n.startsWith("55") ? n : "55" + n;
+  const nome = [v.marca, v.modelo, v.versao].filter(Boolean).join(" ");
+  const ano = v.anoFab && v.anoModelo ? v.anoFab + "/" + v.anoModelo : (v.anoModelo || v.anoFab || "");
+  const linhas = [
+    "Olá! Vi o *" + nome + "*" + (ano ? " " + ano : "") + " no site da JOLUX MOTORS e tenho interesse.",
+    v.km ? "KM: " + v.km : null,
+    v.cor ? "Cor: " + v.cor : null,
+    "Código do anúncio: " + v.id,
+    "",
+    "Ele ainda está disponível? Gostaria de saber valores, formas de pagamento e agendar uma visita.",
+  ].filter(l => l !== null);
+  return "https://wa.me/" + full + "?text=" + encodeURIComponent(linhas.join("\n"));
+}
+function VehicleCard({ v, onInterest, whats }) {
+  const [fi, setFi] = useState(0);
+  const fotos = v.fotos || [];
+  const n = fotos.length;
+  return (
+    <div className="border border-[#EEEEEE] bg-white hover:border-[#D6B56D] transition-colors rounded-[16px] overflow-hidden">
+      <div className="aspect-[16/10] bg-[#FAFAFA] border-b border-[#EEEEEE] overflow-hidden flex items-center justify-center relative">
+        {n > 0
+          ? <img src={fotos[fi % n]} alt={v.marca + " " + v.modelo} className="w-full h-full object-cover" />
+          : <div className="text-center"><div className="text-[11px] tracking-widest text-neutral-400">ÁREA PARA FOTO</div><div className="text-[10px] text-neutral-400 mt-1">Adicionar no Admin</div></div>}
+        {n > 1 && (
+          <>
+            <button type="button" onClick={() => setFi((fi - 1 + n) % n)} className="absolute left-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-white/90 border border-[#EEEEEE] text-[14px] leading-none">‹</button>
+            <button type="button" onClick={() => setFi((fi + 1) % n)} className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-white/90 border border-[#EEEEEE] text-[14px] leading-none">›</button>
+            <span className="absolute bottom-2 right-2 px-2 py-0.5 bg-black text-white text-[10px] rounded-full">{(fi % n) + 1}/{n}</span>
+          </>
+        )}
+        <span className="absolute top-2 left-2 px-2 py-1 bg-white border border-[#EEEEEE] text-[10px] uppercase tracking-widest rounded-full">{v.status}</span>
+      </div>
+      <div className="p-4">
+        <div className="text-[13px] font-semibold mont">{v.marca} {v.modelo} <span className="font-normal text-neutral-500">{v.versao}</span></div>
+        <div className="text-[11px] text-neutral-500 mt-1">{v.tipo || "—"} • {v.categoria || "—"} • {v.anoFab || "—"}/{v.anoModelo || "—"} • {v.km ? v.km + " km" : "KM não informado"}</div>
+        {(v.opcionais || []).length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {v.opcionais.slice(0, 3).map((o, i) => <span key={i} className="px-2 py-0.5 border border-[#EEEEEE] rounded-full text-[10px]">{o}</span>)}
+          </div>
+        )}
+        <div className="mt-4 flex items-center justify-between gap-2">
+          <span className="text-[11px] font-mono text-neutral-400">ID {v.id}</span>
+          <div className="flex gap-2">
+            <a href={waLink(whats, v)} target="_blank" rel="noopener" className="px-3 h-7 inline-flex items-center bg-[#25D366] text-white text-[11px] rounded-full">WhatsApp</a>
+            <button onClick={() => onInterest(v)} className="px-3 h-7 bg-black text-white text-[11px] rounded-full">Tenho interesse</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+/* ================= LOGIN / CADASTRO COM CÓDIGO ================= */
+const errText = j => String((j && (j.msg || j.error_description || j.message || j.error)) || "");
+function authErr(j) {
+  const m = errText(j);
+  if (/invalid login/i.test(m)) return "Email ou senha incorretos.";
+  if (/already registered/i.test(m)) return "Este email já tem conta. Use Entrar.";
+  if (/at least|weak/i.test(m)) return "A senha precisa ter pelo menos 6 caracteres.";
+  if (/rate limit|too many|seconds/i.test(m)) return "Muitas tentativas. Aguarde um pouco e tente de novo.";
+  if (/database error|duplicate|unique/i.test(m)) return "Não foi possível criar a conta. Esse CPF ou e-mail já pode estar cadastrado.";
+  if (/expired|invalid/i.test(m)) return "Código incorreto ou expirado. Confira ou peça um novo.";
+  return "Não foi possível concluir. Tente novamente.";
+}
+
+function Auth({ onLogin }) {
+  // modos: login | signup | verify | forgot | verifyrec | newpass
+  const [mode, setMode] = useState("login");
+  const [nome, setNome] = useState("");
+  const [cpf, setCpf] = useState("");
+  const [tel, setTel] = useState("");
+  const [lgpd, setLgpd] = useState(false);
+  const [email, setEmail] = useState("");
+  const [senha, setSenha] = useState("");
+  const [code, setCode] = useState("");
+  const [recTok, setRecTok] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [good, setGood] = useState(false);
+
+  const H = { apikey: SB_KEY, "Content-Type": "application/json" };
+  const say = (t, g = false) => { setMsg(t); setGood(g); };
+  const goMode = m => { setMode(m); setMsg(""); setCode(""); };
+  const post = async (path, body) => {
+    const r = await fetch(SB_URL + path, { method: "POST", headers: H, body: JSON.stringify(body) });
+    return { ok: r.ok, j: await r.json().catch(() => ({})) };
+  };
+  const finish = (j, em) => {
+    const u = j.user || {};
+    const t = {
+      email: u.email || em,
+      nome: (u.user_metadata && u.user_metadata.nome) || nome.trim(),
+      exp: Date.now() + 6048e5,
+      access_token: j.access_token,
+      refresh_token: j.refresh_token,
+      expires_at: Date.now() + (j.expires_in || 3600) * 1000 - 60000,
+    };
+    try { localStorage.setItem("jolux_user", JSON.stringify(t)); } catch (e) {}
+    setSenha(""); setCode(""); setMsg(""); setCpf(""); setTel(""); setLgpd(false);
+    onLogin(t);
+  };
+
+  async function submit(ev) {
+    ev.preventDefault();
+    const em = email.trim().toLowerCase();
+    setBusy(true); setMsg("");
+    try {
+      if (mode === "login") {
+        const { ok, j } = await post("/auth/v1/token?grant_type=password", { email: em, password: senha });
+        if (ok && j.access_token) finish(j, em);
+        else if (/not confirmed/i.test(errText(j))) {
+          await post("/auth/v1/resend", { type: "signup", email: em });
+          setMode("verify"); setCode("");
+          say("Sua conta ainda não foi confirmada. Enviamos um novo código para " + em + ".", true);
+        } else say(authErr(j));
+      }
+      else if (mode === "signup") {
+        const partes = nome.trim().split(/\s+/);
+        if (partes.length < 2 || partes.some(p => p.length < 2)) { say("Digite seu nome completo (nome e sobrenome)."); return; }
+        if (!validCPF(cpf)) { say("CPF inválido. Confira os números."); return; }
+        const td = onlyDigits(tel);
+        if (td.length < 10 || td.length > 11) { say("Digite um telefone válido, com DDD."); return; }
+        if (!lgpd) { say("Aceite a Política de Privacidade para criar a conta."); return; }
+        const { ok, j } = await post("/auth/v1/signup", { email: em, password: senha, data: { nome: nome.trim(), cpf: onlyDigits(cpf), telefone: td, lgpd_aceito: true, lgpd_em: new Date().toISOString() } });
+        if (ok && j.access_token) finish(j, em);
+        else if (ok && (j.id || j.user)) {
+          // entra direto (funciona quando "Confirm email" está desligado no Supabase)
+          const lg = await post("/auth/v1/token?grant_type=password", { email: em, password: senha });
+          if (lg.ok && lg.j.access_token) finish(lg.j, em);
+          else say("Conta criada, mas o Supabase ainda exige confirmação por código. Desligue 'Confirm email' em Authentication → Providers → Email.");
+        }
+        else say(authErr(j));
+      }
+      else if (mode === "verify") {
+        const { ok, j } = await post("/auth/v1/verify", { type: "signup", email: em, token: code.trim() });
+        if (ok && j.access_token) finish(j, em);
+        else say("Código incorreto ou expirado. Confira ou peça um novo.");
+      }
+      else if (mode === "forgot") {
+        await post("/auth/v1/recover", { email: em }).catch(() => {});
+        setMode("verifyrec"); setCode("");
+        say("Se esse email tiver conta, enviamos um código para " + em + ".", true);
+      }
+      else if (mode === "verifyrec") {
+        const { ok, j } = await post("/auth/v1/verify", { type: "recovery", email: em, token: code.trim() });
+        if (ok && j.access_token) { setRecTok(j.access_token); setCode(""); setSenha(""); setMode("newpass"); setMsg(""); }
+        else say("Código incorreto ou expirado. Confira ou peça um novo.");
+      }
+      else { // newpass
+        const r = await fetch(SB_URL + "/auth/v1/user", { method: "PUT", headers: { ...H, Authorization: "Bearer " + recTok }, body: JSON.stringify({ password: senha }) });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) { setRecTok(null); setSenha(""); setMode("login"); say("Senha alterada! Agora é só entrar.", true); }
+        else say(authErr(j));
+      }
+    } catch (e) { say("Erro de conexão. Tente novamente."); }
+    finally { setBusy(false); }
+  }
+
+  async function reenviar() {
+    const em = email.trim().toLowerCase();
+    setBusy(true); setMsg("");
+    try {
+      const { ok, j } = mode === "verifyrec"
+        ? await post("/auth/v1/recover", { email: em })
+        : await post("/auth/v1/resend", { type: "signup", email: em });
+      if (ok) say("Novo código enviado para " + em + ".", true); else say(authErr(j));
+    } catch (e) { say("Erro de conexão. Tente novamente."); }
+    finally { setBusy(false); }
+  }
+
+  const inp = "w-full h-11 px-4 border border-[#EEEEEE] rounded-full text-[14px] mt-3";
+  const lk = "text-[12px] text-neutral-500 hover:text-black underline";
+  const titles = { login:"Entrar", signup:"Criar conta", verify:"Confirmar email", forgot:"Recuperar senha", verifyrec:"Confirmar código", newpass:"Nova senha" };
+  const subs = {
+    login:"Entre com seu email e senha.",
+    signup:"Preencha todos os campos para criar sua conta.",
+    verify:"Digite o código que enviamos para " + email + ".",
+    forgot:"Digite seu email para receber um código.",
+    verifyrec:"Digite o código que enviamos para " + email + ".",
+    newpass:"Escolha uma nova senha.",
+  };
+  const btns = { login:"Entrar", signup:"Criar conta", verify:"Confirmar e criar conta", forgot:"Enviar código", verifyrec:"Confirmar código", newpass:"Salvar nova senha" };
+
+  return (
+    <form onSubmit={submit} className="w-full border border-[#EEEEEE] bg-white" style={{ maxWidth: 380, padding: 32, borderRadius: 16 }}>
+      <div className="text-[11px] tracking-[0.14em] font-semibold" style={{ color: GOLD }}>JOLUX MOTORS</div>
+      <h1 className="mt-2 font-extrabold mont" style={{ fontSize: 24 }}>{titles[mode]}</h1>
+      <p className="mt-1 text-[12px] text-neutral-500">{subs[mode]}</p>
+
+      {mode === "signup" && <input type="text" value={nome} onChange={e => setNome(e.target.value)} placeholder="Nome completo" autoComplete="name" required className={inp} />}
+      {mode === "signup" && <input type="text" inputMode="numeric" value={cpf} onChange={e => setCpf(maskCPF(e.target.value))} placeholder="CPF (000.000.000-00)" autoComplete="off" maxLength={14} required className={inp} />}
+      {mode === "signup" && <input type="tel" value={tel} onChange={e => setTel(maskPhone(e.target.value))} placeholder="Telefone com DDD" autoComplete="tel" maxLength={15} required className={inp} />}
+      {["login","signup","forgot"].includes(mode) && <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" autoComplete="username" required className={inp} />}
+      {["login","signup","newpass"].includes(mode) && <input type="password" value={senha} onChange={e => setSenha(e.target.value)} placeholder={mode === "newpass" ? "Nova senha" : "Senha"} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={6} required className={inp} />}
+      {(mode === "verify" || mode === "verifyrec") && <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} placeholder="Código" required className={inp + " text-center tracking-[0.3em]"} />}
+
+      {mode === "signup" && (
+        <label className="mt-4 flex gap-2 items-start text-[11px] text-neutral-600 leading-relaxed">
+          <input type="checkbox" checked={lgpd} onChange={e => setLgpd(e.target.checked)} required className="mt-0.5" />
+          <span>Li e concordo com a <a href="#privacidade" target="_blank" rel="noopener" className="underline">Política de Privacidade</a> e com o uso dos meus dados (nome, CPF, telefone e e-mail) para cadastro e contato, conforme a LGPD.</span>
+        </label>
+      )}
+
+      {msg && <div className="mt-3 text-[12px]" style={{ color: good ? "#15803d" : "#dc2626" }}>{msg}</div>}
+
+      <button type="submit" disabled={busy} className="mt-5 w-full h-11 bg-black text-white text-[13px] font-semibold rounded-full" style={{ opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Aguarde..." : btns[mode]}
+      </button>
+
+      {mode === "login" && (
+        <div className="mt-4 flex justify-between">
+          <button type="button" onClick={() => goMode("signup")} className={lk}>Criar conta</button>
+          <button type="button" onClick={() => goMode("forgot")} className={lk}>Esqueci a senha</button>
+        </div>
+      )}
+      {(mode === "verify" || mode === "verifyrec") && (
+        <div className="mt-4 text-center"><button type="button" disabled={busy} onClick={reenviar} className={lk}>Reenviar código</button></div>
+      )}
+      {mode !== "login" && mode !== "newpass" && (
+        <div className="mt-3 text-center"><button type="button" onClick={() => goMode("login")} className={lk}>Já tenho conta</button></div>
+      )}
+    </form>
+  );
+}
+/* ================= APP ================= */
+function App() {
+  const [page, setPage] = useState("inicio");
+  const [vehicles, setVehicles] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [search, setSearch] = useState("");
+  const [heroSearch, setHeroSearch] = useState("");
+  const [tipoFiltro, setTipoFiltro] = useState("Todos tipos");
+  const [modal, setModal] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [form, setForm] = useState(EMPTY);
+  const [optInput, setOptInput] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [sel, setSel] = useState(null);
+  const [cfg, setCfg] = useState(DEFAULT_CFG);
+  const [cfgDraft, setCfgDraft] = useState(DEFAULT_CFG);
+  const [cForm, setCForm] = useState(EMPTY_CONTACT);
+  const [user, setUser] = useState(() => {
+    try {
+      const t = JSON.parse(localStorage.getItem("jolux_user") || "null");
+      // sessões antigas (sem token) são descartadas: é só entrar de novo
+      return t && t.exp > Date.now() && t.access_token ? t : null;
+    } catch (e) { return null; }
+  });
+
+  const isAdm = !!user && (user.email || "").toLowerCase() === ADMIN_EMAIL;
+  const isAdminPage = page.startsWith("admin");
+
+  /* roteamento por hash */
+  const go = p => {
+    p = p === "home" ? "inicio" : p;
+    setPage(p);
+    if (location.hash !== "#" + p) location.hash = p;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  useEffect(() => {
+    const f = () => {
+      const h = (location.hash || "").replace("#", "").trim().toLowerCase();
+      setPage(PAGES.includes(h) ? h : "inicio");
+    };
+    f();
+    window.addEventListener("hashchange", f);
+    return () => window.removeEventListener("hashchange", f);
+  }, []);
+  useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4200); return () => clearTimeout(t); }, [toast]);
+  useEffect(() => { setCfgDraft(cfg); }, [cfg]);
+
+  /* carregar dados do Supabase */
+  async function loadVehicles() {
+    try {
+      const rows = await sb("/veiculos_site?select=*&order=created_at.desc");
+      setVehicles((rows || []).map(r => ({ ...EMPTY, ...r.dados, id: r.id, status: r.status, createdAt: new Date(r.created_at).getTime() })));
+    } catch (e) { setToast("Não foi possível carregar os veículos: " + e.message); }
+  }
+  async function loadLeads() {
+    try {
+      const rows = await sb("/leads_site?select=*&order=created_at.desc");
+      setLeads((rows || []).map(r => ({ ...r.dados, id: r.id })));
+    } catch (e) { setToast("Não foi possível carregar os interessados: " + e.message); }
+  }
+  async function loadCfg() {
+    try {
+      const rows = await sb("/config_site?id=eq.geral&select=dados");
+      if (rows && rows[0] && rows[0].dados) setCfg({ ...DEFAULT_CFG, ...rows[0].dados });
+    } catch (e) {}
+  }
+  useEffect(() => { loadCfg(); }, []);
+  useEffect(() => { loadVehicles(); if (isAdm) loadLeads(); else setLeads([]); }, [user]);
+
+  const logout = () => { try { localStorage.removeItem("jolux_user"); } catch (e) {} setUser(null); go("inicio"); };
+
+  /* dados derivados */
+  const tipos = useMemo(() => ["Todos tipos", ...Array.from(new Set(vehicles.map(v => v.tipo).filter(Boolean)))], [vehicles]);
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return vehicles.filter(v => {
+      const okQ = !q || `${v.marca} ${v.modelo} ${v.id} ${v.versao}`.toLowerCase().includes(q);
+      const okT = tipoFiltro === "Todos tipos" || v.tipo === tipoFiltro;
+      return okQ && okT;
+    });
+  }, [vehicles, search, tipoFiltro]);
+  const published = vehicles.filter(v => v.status === "publicado");
+  const publishedFiltered = filtered.filter(v => v.status === "publicado");
+  const featured = published[0] || null;
+  const stats = {
+    total: vehicles.length, publicados: published.length,
+    rascunho: vehicles.filter(v => v.status === "rascunho").length,
+    reservados: vehicles.filter(v => v.status === "reservado").length,
+  };
+
+  /* veículos (salvos no Supabase) */
+  const resetForm = () => { setForm(EMPTY); setOptInput(""); setEditId(null); };
+  async function saveVehicle() {
+    if (uploading) { setToast("Aguarde o envio das fotos terminar."); return; }
+    if (!form.marca.trim() || !form.modelo.trim()) { setToast("Marca e Modelo são obrigatórios."); return; }
+    const { id, createdAt, ...dados } = form;
+    dados.fotos = (dados.fotos || []).filter(f => /^https?:/.test(String(f)));
+    try {
+      if (editId) {
+        const res = await sb("/veiculos_site?id=eq." + encodeURIComponent(editId), { method: "PATCH", body: JSON.stringify({ status: form.status, dados }) });
+        if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      } else {
+        await sb("/veiculos_site", { method: "POST", body: JSON.stringify({ id: uid(), status: form.status, dados }) });
+      }
+      await loadVehicles();
+      setToast(editId ? "Veículo atualizado." : "Veículo salvo.");
+      resetForm(); setModal(false);
+    } catch (e) { setToast("Erro ao salvar: " + e.message); }
+  }
+  async function removeVehicle(id) {
+    if (!confirm("Remover este veículo?")) return;
+    try {
+      const res = await sb("/veiculos_site?id=eq." + encodeURIComponent(id), { method: "DELETE" });
+      if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      const antigo = vehicles.find(x => x.id === id);
+      if (antigo) await Promise.all((antigo.fotos || []).map(deleteFoto));
+      await loadVehicles();
+      setToast("Veículo removido.");
+    } catch (e) { setToast("Erro ao remover: " + e.message); }
+  }
+  const editVehicle = v => { setForm(v); setEditId(v.id); setModal(true); };
+  function addOpt() {
+    const t = optInput.trim(); if (!t) return;
+    setForm(f => ({ ...f, opcionais: [...(f.opcionais || []), t] })); setOptInput("");
+  }
+  async function addPhotos(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    if ((form.fotos || []).length + files.length > MAX_FOTOS) { setToast("Máximo de " + MAX_FOTOS + " fotos por veículo."); return; }
+    setUploading(true);
+    try {
+      const urls = [];
+      for (const f of files) urls.push(await uploadFoto(await compressImage(f)));
+      setForm(fm => ({ ...fm, fotos: [...(fm.fotos || []), ...urls] }));
+      setToast(urls.length === 1 ? "Foto enviada." : urls.length + " fotos enviadas.");
+    } catch (err) { setToast("Erro ao enviar foto: " + err.message); }
+    finally { setUploading(false); }
+  }
+
+  /* interesse / contato */
+  function interest(v) {
+    setSel(v);
+    setCForm(f => ({ ...f, interesse: `${v.marca} ${v.modelo} ${v.versao} — ID ${v.id}`, vehicle_id: v.id, origem: "veiculo:" + v.id }));
+    go("contato");
+  }
+  async function sendMail(l) {
+    try {
+      const r = await fetch("https://api.web3forms.com/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          access_key: WEB3_KEY,
+          subject: "Novo contato JOLUX MOTORS - " + l.nome,
+          from_name: l.nome, name: l.nome,
+          email: l.email || cfg.email_contato,
+          whatsapp: l.whatsapp,
+          message: `Nome: ${l.nome}\nWhatsApp: ${l.whatsapp}\nEmail: ${l.email || "não informado"}\nInteresse: ${l.interesse}\nVeículo: ${l.vehicle_id || "contato geral"}\nOrigem: ${l.origem}\n\nMensagem:\n${l.mensagem}`,
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      return r.ok && j.success !== false ? null : (j.message || "tente novamente");
+    } catch (e) { return "erro de conexão"; }
+  }
+  async function saveLead(l) {
+    try {
+      await sb("/leads_site", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ id: l.id, dados: l }) });
+    } catch (e) { /* o e-mail é o principal; se o banco falhar, não atrapalha o visitante */ }
+  }
+  async function submitContact(ev) {
+    ev.preventDefault();
+    if (!cForm.lgpd) { setToast("Aceite LGPD para continuar."); return; }
+    if (!cForm.nome.trim() || !cForm.whatsapp.trim()) { setToast("Preencha nome e WhatsApp."); return; }
+    const lead = {
+      id: uid(), nome: cForm.nome.trim(), whatsapp: cForm.whatsapp.trim(), email: cForm.email.trim() || cfg.email_contato,
+      interesse: cForm.interesse.trim() || (cForm.vehicle_id ? "Veículo " + cForm.vehicle_id : "contato geral"),
+      mensagem: cForm.mensagem.trim(), vehicle_id: cForm.vehicle_id, origem: cForm.origem, createdAt: Date.now(),
+    };
+    setLeads(l => [lead, ...l]);
+    setToast("Enviando...");
+    saveLead(lead);
+    const err = await sendMail(lead);
+    if (err) setToast("Erro ao enviar: " + err + ". Fale pelo WhatsApp: " + cfg.whatsapp);
+    else { setToast("Mensagem enviada! Em breve entraremos em contato."); setCForm(EMPTY_CONTACT); setSel(null); }
+  }
+  function openWhatsApp() {
+    const linhas = [
+      "Olá! Vim pelo site da JOLUX MOTORS e gostaria de atendimento.",
+      cForm.nome ? "Meu nome: " + cForm.nome : null,
+      cForm.interesse ? "Interesse: " + cForm.interesse : null,
+      cForm.mensagem ? "Mensagem: " + cForm.mensagem : null,
+    ].filter(Boolean);
+    const n = (cfg.whatsapp || "").replace(/\D/g, "");
+    window.open(`https://wa.me/${n.startsWith("55") ? n : "55" + n}?text=${encodeURIComponent(linhas.join("\n"))}`, "_blank");
+  }
+  async function saveCfg() {
+    const w = cfgDraft.whatsapp.trim(), e = cfgDraft.email_contato.trim();
+    if (!e.includes("@")) { setToast("Email de contato inválido."); return; }
+    const next = { whatsapp: w || cfg.whatsapp, email_contato: e };
+    try {
+      await sb("/config_site", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify({ id: "geral", dados: next, updated_at: new Date().toISOString() }),
+      });
+      setCfg(next);
+      setToast(`Configuração salva: WhatsApp ${next.whatsapp} / Email ${next.email_contato}`);
+    } catch (err) { setToast("Erro ao salvar configuração: " + err.message); }
+  }
+  
+  /* telas reutilizáveis */
+  const authBox = <Auth onLogin={u => { setUser(u); }} />;
+  const accountBox = (
+    <div className="w-full border border-[#EEEEEE] bg-white" style={{ maxWidth: 380, padding: 32, borderRadius: 16 }}>
+      <div className="text-[11px] tracking-[0.14em] font-semibold" style={{ color: GOLD }}>JOLUX MOTORS</div>
+      <h1 className="mt-2 font-extrabold mont" style={{ fontSize: 24 }}>{user && user.nome ? "Olá, " + user.nome.split(" ")[0] : "Minha conta"}</h1>
+      <p className="mt-1 text-[13px] text-neutral-600 break-all">{user && user.email}</p>
+      {isAdm && <button onClick={() => go("admin-veiculos")} className="mt-6 w-full h-11 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full">Abrir painel admin</button>}
+      <button onClick={() => go("catalogo")} className="mt-3 w-full h-11 border border-[#EEEEEE] text-[13px] rounded-full hover:bg-neutral-50">Ver catálogo</button>
+      <button onClick={logout} className="mt-3 w-full h-11 bg-black text-white text-[13px] font-semibold rounded-full">Sair</button>
+    </div>
+  );
+
+  if (isAdminPage && !isAdm) {
+    return (
+      <div className="min-h-screen bg-white text-black flex flex-col items-center justify-center gap-4 px-6">
+        {user ? (
+          <div className="w-full border border-[#EEEEEE] bg-white" style={{ maxWidth: 380, padding: 32, borderRadius: 16 }}>
+            <h1 className="text-[22px] font-extrabold mont">Acesso restrito</h1>
+            <p className="mt-2 text-[13px] text-neutral-600">Esta conta não tem permissão para abrir o painel administrativo.</p>
+            <button onClick={() => go("inicio")} className="mt-6 w-full h-11 bg-black text-white text-[13px] font-semibold rounded-full">Voltar ao site</button>
+            <button onClick={logout} className="mt-3 w-full h-11 border border-[#EEEEEE] text-[13px] rounded-full">Sair</button>
+          </div>
+        ) : authBox}
+        {!user && <button onClick={() => go("inicio")} className="text-[12px] text-neutral-500 hover:text-black underline">Voltar ao site</button>}
+      </div>
+    );
+  }
+
+  const crumb = page === "inicio" ? "Início" : page === "catalogo" ? "Catálogo" : page === "contato" ? "Contato" : page === "conta" ? "Conta" : page === "privacidade" ? "Privacidade" : page.replace("admin-", "Admin / ");
+  const navBtn = (id, label) => <button onClick={() => go(id)} className={"hover:opacity-60 " + (page === id ? "font-semibold" : "font-normal")}>{label}</button>;
+  const adminNav = [["admin-dashboard","Dashboard"],["admin-veiculos","Veículos"],["admin-usuarios","Usuários"],["admin-leads","Interessados"],["admin-config","Configurações"]];
+  const pill = "rounded-full";
+
+  return (
+    <div className="min-h-screen bg-white text-black flex flex-col">
+      {/* HEADER */}
+      <header className="sticky top-0 z-40 bg-white border-b border-[#EEEEEE]">
+        <div className="mx-auto max-w-[1440px] px-6 h-[72px] flex items-center justify-between">
+          <div className="flex items-center gap-10">
+            <a href="#inicio" onClick={e => { e.preventDefault(); go("inicio"); }} className="flex items-center gap-3 px-2 py-1 -ml-2 rounded-xl hover:bg-[#FAFAFA] transition-colors">
+              <Logo />
+              <span className="tracking-[0.12em] text-[14px] font-bold mont">JOLUX MOTORS</span>
+            </a>
+            <nav className="hidden md:flex items-center gap-8 text-[13px]">
+              {navBtn("inicio", "Início")}{navBtn("catalogo", "Catálogo")}{navBtn("contato", "Contato")}
+            </nav>
+          </div>
+          <div className="flex items-center gap-3">
+            {isAdm && <button onClick={() => go("admin-veiculos")} className="hidden md:block px-5 h-9 bg-black text-white text-[12px] font-semibold rounded-full hover:opacity-80">Painel</button>}
+            {user
+              ? <button onClick={() => go("conta")} className="px-4 h-9 border border-[#EEEEEE] text-[12px] font-semibold rounded-full hover:bg-neutral-50">Minha conta</button>
+              : <button onClick={() => go("conta")} className="px-5 h-9 bg-black text-white text-[12px] font-semibold rounded-full hover:opacity-80">Entrar</button>}
+          </div>
+        </div>
+        <div className="md:hidden border-t border-[#EEEEEE] flex">
+          {[["inicio","Início"],["catalogo","Catálogo"],["contato","Contato"]].map(([id, l]) => (
+            <button key={id} onClick={() => go(id)} className={"flex-1 py-3 text-[12px] " + (page === id ? "font-bold" : "")}>{l}</button>
+          ))}
+          {isAdm
+            ? <button onClick={() => go("admin-veiculos")} className="flex-1 py-3 text-[12px] bg-black text-white">Admin</button>
+            : <button onClick={() => go("conta")} className="flex-1 py-3 text-[12px] bg-black text-white">{user ? "Conta" : "Entrar"}</button>}
+        </div>
+      </header>
+
+      <div className="mx-auto w-full max-w-[1440px] px-6 md:px-10 py-3 text-[11px] text-neutral-500 flex gap-2">
+        <button onClick={() => go("inicio")} className="hover:underline">Início</button><span>/</span>
+        <span className="text-black font-medium">{crumb}</span>
+      </div>
+
+      <div className="mx-auto w-full max-w-[1440px] flex flex-1">
+        {/* SIDEBAR ADMIN */}
+        {isAdminPage && (
+          <aside className="hidden md:flex w-[260px] border-r border-[#EEEEEE] flex-col justify-between sticky self-start" style={{ top: 72, minHeight: "calc(100vh - 72px)" }}>
+            <div>
+              <div className="p-6 border-b border-[#EEEEEE]">
+                <div className="text-[10px] tracking-widest text-neutral-500">LOGADO COMO</div>
+                <div className="text-[11px] mt-1 truncate font-medium">admin • {user.email}</div>
+                <div className="inline-flex mt-2 items-center gap-1.5 px-2 py-1 rounded-full bg-black text-white text-[10px]">
+                  <span className="w-1.5 h-1.5 bg-[#22c55e] rounded-full"></span> admin • ativo
+                </div>
+              </div>
+              <nav className="p-3 flex flex-col gap-1">
+                {adminNav.map(([id, l]) => (
+                  <button key={id} onClick={() => go(id)} className={"text-left px-4 h-10 rounded-full text-[13px] flex items-center justify-between " + (page === id ? "bg-black text-white font-semibold" : "hover:bg-neutral-50")}>
+                    {l}{id === "admin-veiculos" && <span className="text-[11px] opacity-60">{vehicles.length}</span>}
+                  </button>
+                ))}
+              </nav>
+            </div>
+            <div className="p-4">
+              <button onClick={logout} className="w-full h-10 border border-[#EEEEEE] rounded-full text-[13px] hover:bg-neutral-50">Sair</button>
+              <div className="mt-4 text-[10px] text-neutral-400 leading-relaxed">Dados salvos no Supabase.<br />JOLUX MOTORS</div>
+            </div>
+          </aside>
+        )}
+
+        <main className="flex-1 min-w-0">
+            
+          {/* ===== INÍCIO ===== */}
+          {page === "inicio" && (
+            <div>
+              <section className="px-6 md:px-10 py-10 md:py-14 border-b border-[#EEEEEE]">
+                <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_0.9fr] gap-10 lg:gap-12 items-start">
+                  <div>
+                    <h1 className="mont font-extrabold leading-[0.9] tracking-[-0.03em] text-[40px] md:text-[64px]">Seu próximo carro<br />começa aqui.</h1>
+                    <p className="mt-5 text-[14px] md:text-[15px] leading-[1.5] text-neutral-600 max-w-[560px]">Encontre carros e motos em Mossoró/RN. Todo veículo é cadastrado manualmente pela nossa equipe.</p>
+                    <form onSubmit={e => { e.preventDefault(); setSearch(heroSearch); go("catalogo"); }} className="mt-8 flex items-center gap-2 border border-[#EEEEEE] bg-white rounded-full px-2 py-2 shadow-[0_2px_12px_rgba(0,0,0,0.04)] max-w-[520px]">
+                      <div className="pl-3 pr-1 text-neutral-400">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="6" /><path d="M21 21l-3.5-3.5" /></svg>
+                      </div>
+                      <input value={heroSearch} onChange={e => setHeroSearch(e.target.value)} placeholder="Buscar marca, modelo, versão..." className="flex-1 h-10 bg-transparent text-[14px] border-none px-2" style={{ outline: "none" }} />
+                      <button type="submit" className="px-6 h-10 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full hover:brightness-95">Buscar agora</button>
+                    </form>
+                    <div className="mt-6 flex flex-wrap items-center gap-2">
+                      {["Carros", "Motos"].map(t => (
+                        <button key={t} onClick={() => { setTipoFiltro(t); setSearch(""); go("catalogo"); }} className={"px-4 h-8 rounded-full border text-[12px] " + (tipoFiltro === t ? "bg-black text-white border-black" : "border-[#EEEEEE] bg-white hover:bg-neutral-50")}>{t}</button>
+                      ))}
+                      <span className="ml-2 text-[12px] text-neutral-500">{stats.publicados} publicados</span>
+                    </div>
+                    <div className="mt-10 grid grid-cols-3 gap-3 max-w-[560px]">
+                      <div className="border border-[#EEEEEE] rounded-[16px] p-4 bg-white"><div className="text-[10px] tracking-widest uppercase text-neutral-500">TOTAL</div><div className="text-[28px] font-bold mt-2 mont">{stats.total}</div></div>
+                      <div className="border border-[#EEEEEE] rounded-[16px] p-4 bg-white"><div className="text-[10px] tracking-widest uppercase text-neutral-500">PUBLICADOS</div><div className="text-[28px] font-bold mt-2 mont">{stats.publicados}</div></div>
+                      <div className="border border-[#1A1A1A] rounded-[16px] p-4 bg-black text-white"><div className="text-[10px] tracking-widest uppercase text-neutral-400">LEADS</div><div className="text-[28px] font-bold mt-2 mont">{leads.length}</div></div>
+                    </div>
+                  </div>
+
+                  <div className="border border-[#EEEEEE] rounded-[24px] overflow-hidden bg-white shadow-[0_8px_32px_rgba(0,0,0,0.06)]">
+                    <div className="aspect-[4/3] bg-[#FAFAFA] border-b border-[#EEEEEE] relative flex items-center justify-center overflow-hidden">
+                      {featured && featured.fotos && featured.fotos[0]
+                        ? <img src={featured.fotos[0]} alt="" className="w-full h-full object-cover" />
+                        : <div className="text-center px-6">
+                            <div className="inline-flex px-3 py-1 rounded-full border border-[#EEEEEE] bg-white text-[10px] tracking-widest">ÁREA PARA FOTO</div>
+                            <div className="mt-3 text-[12px] text-neutral-500">Nenhum veículo publicado ainda</div>
+                          </div>}
+                      <div className="absolute top-4 left-4 flex gap-2">
+                        <span className="px-3 py-1 rounded-full bg-white border border-[#EEEEEE] text-[10px] tracking-widest">MOSSORÓ/RN</span>
+                        <span className="px-3 py-1 rounded-full bg-black text-white text-[10px] tracking-widest">{stats.publicados} AO VIVO</span>
+                      </div>
+                    </div>
+                    <div className="p-5">
+                      {featured ? (
+                        <>
+                          <div className="flex items-start justify-between gap-4">
+                            <div>
+                              <div className="text-[14px] font-semibold mont">{featured.marca} {featured.modelo}</div>
+                              <div className="text-[12px] text-neutral-500 mt-1">{featured.versao || "Versão não informada"} • {featured.anoFab || "—"}/{featured.anoModelo || "—"}</div>
+                            </div>
+                            <span className="px-2 py-1 rounded-full bg-[#FFF8E1] border border-[#F6E8B8] text-[10px]">DESTAQUE</span>
+                          </div>
+                          <button onClick={() => interest(featured)} className="mt-4 w-full h-10 rounded-full bg-black text-white text-[12px] font-semibold">Tenho interesse</button>
+                        </>
+                      ) : (
+                        <>
+                          <div className="text-[13px] font-medium">Catálogo inicia vazio</div>
+                          <div className="text-[12px] text-neutral-500 mt-1 leading-relaxed">Os veículos são cadastrados manualmente pelo painel.</div>
+                          {isAdm && <button onClick={() => go("admin-veiculos")} className="mt-4 w-full h-10 rounded-full bg-[#D6B56D] text-black text-[12px] font-semibold">Adicionar primeiro veículo</button>}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="px-6 md:px-10 py-10">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-[18px] md:text-[20px] font-bold mont">Veículos em destaque</h2>
+                  <button onClick={() => go("catalogo")} className="text-[12px] underline underline-offset-4" style={{ textDecorationColor: GOLD }}>Ver catálogo completo</button>
+                </div>
+                {published.length === 0 ? (
+                  <div className="mt-8 border border-[#EEEEEE] rounded-[20px] py-20 px-8 text-center bg-[#FAFAFA]">
+                    <div className="inline-flex px-3 py-1 rounded-full bg-white border border-[#EEEEEE] text-[10px] tracking-[0.14em] font-semibold">CATÁLOGO VAZIO</div>
+                    <h3 className="mt-6 text-[16px] md:text-[18px] font-semibold max-w-[560px] mx-auto leading-[1.4]">{emptyMsg}</h3>
+                    <div className="mt-8 flex justify-center gap-3">
+                      {isAdm && <button onClick={() => go("admin-veiculos")} className="px-6 h-10 bg-[#D6B56D] text-black text-[12px] font-semibold rounded-full">Adicionar primeiro veículo</button>}
+                      <button onClick={() => go("catalogo")} className="px-6 h-10 border border-[#EEEEEE] bg-white text-[12px] rounded-full">Ver catálogo</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">{published.map(v => <VehicleCard key={v.id} v={v} onInterest={interest} whats={cfg.whatsapp} />)}</div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {/* ===== CATÁLOGO ===== */}
+          {page === "catalogo" && (
+            <div className="px-6 md:px-10 py-8">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <h2 className="text-[22px] font-semibold mont">Catálogo</h2>
+                <div className="flex gap-2">
+                  <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Pesquisar marca, modelo, ID..." className="h-10 w-[260px] border border-[#EEEEEE] px-4 text-[13px] rounded-full" />
+                  <select value={tipoFiltro} onChange={e => setTipoFiltro(e.target.value)} className="h-10 border border-[#EEEEEE] px-3 text-[13px] bg-white rounded-full">{tipos.map(t => <option key={t}>{t}</option>)}</select>
+                </div>
+              </div>
+              <div className="mt-6 text-[12px] text-neutral-500">{publishedFiltered.length} veículos</div>
+              {publishedFiltered.length === 0
+                ? <div className="mt-8 border border-[#EEEEEE] rounded-[16px] p-12 text-center text-[13px] text-neutral-600 bg-[#FAFAFA]">{emptyMsg}</div>
+                : <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">{publishedFiltered.map(v => <VehicleCard key={v.id} v={v} onInterest={interest} whats={cfg.whatsapp} />)}</div>}
+            </div>
+          )}
+
+          {/* ===== CONTA ===== */}
+          {page === "conta" && <div className="px-6 md:px-10 py-12 flex justify-center">{user ? accountBox : authBox}</div>}
+
+          {/* ===== CONTATO ===== */}
+          {page === "contato" && (
+            <div className="px-6 md:px-10 py-10 max-w-[720px]">
+              <h2 className="text-[22px] font-semibold mont">Contato</h2>
+              <p className="mt-2 text-[13px] text-neutral-600">Fale com a JOLUX MOTORS — Mossoró/RN. Sua mensagem será enviada para <strong>{cfg.email_contato}</strong>.</p>
+              {sel && (
+                <div className="mt-4 border border-[#F6E8B8] bg-[#FFF8E1] p-3 text-[12px] flex justify-between items-center rounded-[12px]">
+                  <span>Interesse em: <strong>{sel.marca} {sel.modelo}</strong> — ID {sel.id}</span>
+                  <button onClick={() => { setSel(null); setCForm(f => ({ ...f, vehicle_id: "", interesse: "", origem: "contato" })); }} className="text-[11px] underline">Limpar</button>
+                </div>
+              )}
+              <form onSubmit={submitContact} className="mt-8 grid gap-4">
+                <div>
+                  <label className="text-[11px] tracking-widest text-neutral-500 uppercase">Nome completo *</label>
+                  <input value={cForm.nome} onChange={e => setCForm({ ...cForm, nome: e.target.value })} placeholder="Seu nome" className="mt-1 h-11 w-full border border-[#EEEEEE] px-4 text-[13px] rounded-[12px]" />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[11px] tracking-widest text-neutral-500 uppercase">WhatsApp *</label>
+                    <input type="tel" value={cForm.whatsapp} onChange={e => setCForm({ ...cForm, whatsapp: e.target.value })} placeholder="(84) 9xxxx-xxxx" className="mt-1 h-11 w-full border border-[#EEEEEE] px-4 text-[13px] rounded-[12px]" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] tracking-widest text-neutral-500 uppercase">E-mail (opcional)</label>
+                    <input type="email" value={cForm.email} onChange={e => setCForm({ ...cForm, email: e.target.value })} placeholder="seu@email.com" className="mt-1 h-11 w-full border border-[#EEEEEE] px-4 text-[13px] rounded-[12px]" />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[11px] tracking-widest text-neutral-500 uppercase">Interesse</label>
+                  <input value={cForm.interesse} onChange={e => setCForm({ ...cForm, interesse: e.target.value })} placeholder="Interesse (marca/modelo/ID)" className="mt-1 h-11 w-full border border-[#EEEEEE] px-4 text-[13px] bg-[#FAFAFA] rounded-[12px]" />
+                </div>
+                <div>
+                  <label className="text-[11px] tracking-widest text-neutral-500 uppercase">Mensagem</label>
+                  <textarea value={cForm.mensagem} onChange={e => setCForm({ ...cForm, mensagem: e.target.value })} placeholder="Conte o que você procura" className="mt-1 min-h-[120px] w-full border border-[#EEEEEE] p-4 text-[13px] rounded-[12px]" />
+                </div>
+                <label className="flex gap-2 items-start text-[11px] text-neutral-600">
+                  <input type="checkbox" checked={cForm.lgpd} onChange={e => setCForm({ ...cForm, lgpd: e.target.checked })} className="mt-1" />
+                  Concordo com o uso dos dados para contato conforme a <a href="#privacidade" target="_blank" rel="noopener" className="underline">Política de Privacidade</a> (LGPD). *
+                </label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <button type="submit" className="h-11 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full hover:brightness-95">Enviar mensagem</button>
+                  <button type="button" onClick={openWhatsApp} className="h-11 bg-black text-white text-[13px] font-semibold rounded-full hover:opacity-90">WhatsApp {cfg.whatsapp}</button>
+                </div>
+              </form>
+            </div>
+          )}
+          
+          {/* ===== POLÍTICA DE PRIVACIDADE ===== */}
+          {page === "privacidade" && (
+            <div className="px-6 md:px-10 py-10 max-w-[760px]">
+              <h2 className="text-[22px] font-semibold mont">Política de Privacidade</h2>
+              <p className="mt-2 text-[12px] text-neutral-500">Última atualização: novembro de 2026</p>
+              <div className="mt-6 grid gap-6 text-[13px] leading-[1.7] text-neutral-700">
+                {[
+                  ["1. Quem somos", "A JOLUX MOTORS, de Mossoró/RN, é responsável pelo tratamento dos dados pessoais coletados neste site, conforme a Lei Geral de Proteção de Dados (Lei 13.709/2018, a LGPD)."],
+                  ["2. Quais dados coletamos", "No cadastro: nome completo, CPF, telefone, e-mail e senha. No formulário de contato: nome, WhatsApp, e-mail (opcional), interesse e mensagem. Também guardamos no seu navegador as informações necessárias para manter você conectado."],
+                  ["3. Para que usamos", "Para criar e manter a sua conta, evitar cadastros duplicados, responder aos seus contatos e interesses em veículos e prestar atendimento. Não usamos os seus dados para outras finalidades sem avisar você."],
+                  ["4. Base legal", "O tratamento é feito com o seu consentimento, dado ao marcar a caixa de aceite, e para atender pedidos feitos por você."],
+                  ["5. Compartilhamento", "Não vendemos os seus dados. Usamos serviços de terceiros para o site funcionar: Supabase (banco de dados e login), Vercel (hospedagem) e Web3Forms (envio das mensagens de contato por e-mail). Esses serviços tratam os dados apenas para nos prestar o serviço."],
+                  ["6. Por quanto tempo guardamos", "Mantemos os seus dados enquanto a sua conta estiver ativa ou enquanto forem necessários para o atendimento. Você pode pedir a exclusão a qualquer momento."],
+                  ["7. Seus direitos", "Você pode pedir a confirmação de que tratamos os seus dados, o acesso, a correção, a exclusão, a portabilidade e a revogação do consentimento, conforme o art. 18 da LGPD."],
+                  ["8. Segurança", "A senha é guardada de forma criptografada pelo serviço de login, e o acesso aos dados de cadastro e de contatos é restrito à nossa equipe."],
+                  ["9. Fale com a gente", "Para exercer os seus direitos ou tirar dúvidas sobre esta política, escreva para " + cfg.email_contato + "."],
+                ].map(([t, txt]) => (
+                  <section key={t}><h3 className="font-semibold text-black">{t}</h3><p className="mt-1">{txt}</p></section>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ===== ADMIN: VEÍCULOS ===== */}
+          {page === "admin-veiculos" && (
+            <div className="px-6 md:px-10 py-8">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-[20px] font-semibold mont">Veículos — cadastro manual</h2>
+                  <p className="text-[12px] text-neutral-500 mt-1">Todos os campos são texto livre. Só marca e modelo são obrigatórios.</p>
+                </div>
+                <button onClick={() => { resetForm(); setModal(true); }} className="px-5 h-10 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full">+ Adicionar veículo</button>
+              </div>
+              <div className="mt-6 flex gap-2">
+                <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Pesquisar marca, modelo, ID..." className="h-10 flex-1 max-w-[340px] border border-[#EEEEEE] px-4 text-[13px] rounded-full" />
+                <select value={tipoFiltro} onChange={e => setTipoFiltro(e.target.value)} className="h-10 border border-[#EEEEEE] px-3 text-[13px] bg-white rounded-full">{tipos.map(t => <option key={t}>{t}</option>)}</select>
+              </div>
+              {filtered.length === 0 ? (
+                <div className="mt-8 border border-[#EEEEEE] rounded-[16px] py-20 text-center bg-[#FAFAFA]"><p className="text-[14px]">{emptyMsg}</p><p className="text-[12px] text-neutral-500 mt-2">Clique em Adicionar veículo.</p></div>
+              ) : (
+                <div className="mt-6 border border-[#EEEEEE] rounded-[16px] overflow-hidden bg-white">
+                  <div className="hidden md:grid grid-cols-[100px_1fr_120px_120px_120px] gap-2 px-4 h-10 items-center border-b border-[#EEEEEE] text-[11px] tracking-widest text-neutral-500 uppercase">
+                    <span>ID</span><span>Marca / Modelo</span><span>Tipo</span><span>Status</span><span>Ações</span>
+                  </div>
+                  {filtered.map(v => (
+                    <div key={v.id} className="grid md:grid-cols-[100px_1fr_120px_120px_120px] gap-2 px-4 py-4 border-b border-[#EEEEEE] last:border-0 items-center text-[13px]">
+                      <span className="font-mono text-[11px]">{v.id}</span>
+                      <span className="font-medium">{v.marca} {v.modelo} <span className="text-neutral-400 font-normal">{v.versao}</span></span>
+                      <span className="text-[12px]">{v.tipo || "—"}</span>
+                      <span className={"inline-flex px-2 py-1 rounded-full text-[11px] border w-fit " + (v.status === "publicado" ? "bg-black text-white border-black" : "bg-white")}>{v.status}</span>
+                      <div className="flex gap-3">
+                        <button onClick={() => editVehicle(v)} className="text-[12px] underline">Editar</button>
+                        <button onClick={() => removeVehicle(v.id)} className="text-[12px] text-red-500">Remover</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {modal && (
+                <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-4 md:p-8 overflow-auto">
+                  <div className="bg-white w-full max-w-[980px] border border-[#EEEEEE] rounded-[16px] overflow-hidden">
+                    <div className="sticky top-0 bg-white border-b border-[#EEEEEE] px-6 h-[64px] flex items-center justify-between">
+                      <span className="text-[16px] font-semibold mont">{editId ? "Editar veículo" : "Adicionar veículo"}</span>
+                      <button onClick={() => { setModal(false); resetForm(); }} className="w-8 h-8 border border-[#EEEEEE] rounded-full">✕</button>
+                    </div>
+                    <div className="p-6 grid md:grid-cols-2 gap-8">
+                      <div className="space-y-6">
+                        <SectionTitle title="INFORMAÇÕES PRINCIPAIS" />
+                        <div className="grid grid-cols-2 gap-3">
+                          <Field label="Tipo" placeholder="Ex: Carro" value={form.tipo} onChange={v => setForm({ ...form, tipo: v })} />
+                          <Field label="Condição" placeholder="Ex: Usado" value={form.condicao} onChange={v => setForm({ ...form, condicao: v })} />
+                          <Field label="Marca *" placeholder="Ex: Fiat" value={form.marca} onChange={v => setForm({ ...form, marca: v })} required />
+                          <Field label="Modelo *" placeholder="Ex: Argo" value={form.modelo} onChange={v => setForm({ ...form, modelo: v })} required />
+                          <Field label="Versão" placeholder="Ex: 1.0 Flex" value={form.versao} onChange={v => setForm({ ...form, versao: v })} />
+                          <Field label="Categoria" placeholder="SUV, Sedan..." value={form.categoria} onChange={v => setForm({ ...form, categoria: v })} />
+                          <Field label="Ano Fab" placeholder="Ex: 2022" value={form.anoFab} onChange={v => setForm({ ...form, anoFab: v })} />
+                          <Field label="Ano Modelo" placeholder="Ex: 2023" value={form.anoModelo} onChange={v => setForm({ ...form, anoModelo: v })} />
+                          <Field label="KM" placeholder="Ex: 45000" value={form.km} onChange={v => setForm({ ...form, km: v })} />
+                          <Field label="Combustível" placeholder="Flex, Diesel" value={form.combustivel} onChange={v => setForm({ ...form, combustivel: v })} />
+                          <Field label="Câmbio" placeholder="Manual, Automático" value={form.cambio} onChange={v => setForm({ ...form, cambio: v })} />
+                          <Field label="Cor" placeholder="Ex: Preto" value={form.cor} onChange={v => setForm({ ...form, cor: v })} />
+                        </div>
+                        <SectionTitle title="INFORMAÇÕES DO ANÚNCIO" />
+                        <div className="grid gap-3">
+                          <Field label="Anunciante / Proprietário" placeholder="Nome" value={form.anunciante} onChange={v => setForm({ ...form, anunciante: v })} />
+                          <Field label="Telefone / WhatsApp" placeholder="(84) 9xxxx-xxxx" value={form.telefone} onChange={v => setForm({ ...form, telefone: v })} />
+                          <div>
+                            <label className="text-[11px] tracking-widest text-neutral-500 uppercase">Status</label>
+                            <select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })} className="mt-1 w-full h-10 border border-[#EEEEEE] px-3 text-[13px] bg-white rounded-[10px]">
+                              {["rascunho", "publicado", "reservado", "vendido", "arquivado"].map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="space-y-6">
+                        <SectionTitle title="DESCRIÇÃO & OPCIONAIS" />
+                        <div>
+                          <label className="text-[11px] tracking-widest text-neutral-500 uppercase">Descrição completa</label>
+                          <textarea value={form.descricao} onChange={e => setForm({ ...form, descricao: e.target.value })} placeholder="Histórico, estado geral, detalhes..." className="mt-1 w-full min-h-[120px] border border-[#EEEEEE] p-3 text-[13px] rounded-[10px]" />
+                        </div>
+                        <div>
+                          <label className="text-[11px] tracking-widest text-neutral-500 uppercase">Opcionais — digite e pressione Enter</label>
+                          <div className="mt-1 flex gap-2">
+                            <input value={optInput} onChange={e => setOptInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addOpt(); } }} placeholder="Ex: Ar-condicionado" className="flex-1 h-10 border border-[#EEEEEE] px-3 text-[13px] rounded-[10px]" />
+                            <button type="button" onClick={addOpt} className="px-4 h-10 bg-black text-white text-[12px] rounded-full">Add</button>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {(form.opcionais || []).map((o, i) => (
+                              <span key={i} className="px-3 h-7 inline-flex items-center gap-2 border border-[#EEEEEE] rounded-full text-[12px]">
+                                {o}
+                                <button type="button" onClick={() => setForm({ ...form, opcionais: form.opcionais.filter((_, j) => j !== i) })} className="w-4 h-4 rounded-full bg-black text-white text-[10px]">✕</button>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <SectionTitle title="FOTOS" />
+                        <div className="border border-[#EEEEEE] p-3 rounded-[12px]">
+                          <div className="bg-[#FAFAFA] border border-[#EEEEEE] rounded-[10px] h-[160px] flex flex-col items-center justify-center text-[12px] text-neutral-500">
+                            <span>ÁREA PARA FOTO</span>
+                            <span className="text-[11px] mt-1">Até {MAX_FOTOS} fotos • salvas no Supabase</span>
+                            <label className={"mt-3 px-4 h-8 bg-black text-white text-[11px] rounded-full flex items-center " + (uploading ? "opacity-60" : "cursor-pointer")}>
+                              {uploading ? "Enviando..." : "Selecionar fotos"}<input type="file" multiple accept="image/*" disabled={uploading} className="hidden" onChange={addPhotos} />
+                            </label>
+                          </div>
+                          {form.fotos && form.fotos.length > 0 && (
+                            <div className="mt-3 grid grid-cols-3 gap-2">
+                              {form.fotos.map((f, i) => (
+                                <div key={i} className="relative border border-[#EEEEEE] aspect-[4/3] overflow-hidden rounded-[8px]">
+                                  <img src={f} alt="" className="w-full h-full object-cover" />
+                                  <button type="button" onClick={() => setForm({ ...form, fotos: form.fotos.filter((_, j) => j !== i) })} className="absolute top-1 right-1 w-5 h-5 bg-black text-white text-[10px] rounded-full">✕</button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="sticky bottom-0 bg-white border-t border-[#EEEEEE] p-4 flex justify-end gap-2">
+                      <button onClick={() => { setModal(false); resetForm(); }} className="px-6 h-10 border border-[#EEEEEE] text-[13px] rounded-full bg-white">Cancelar</button>
+                      <button onClick={saveVehicle} disabled={uploading} className="px-7 h-10 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full" style={{ opacity: uploading ? 0.6 : 1 }}>Salvar veículo</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* ===== ADMIN: DASHBOARD ===== */}
+          {page === "admin-dashboard" && (
+            <div className="px-6 md:px-10 py-8">
+              <h2 className="text-[20px] font-semibold mont">Dashboard</h2>
+              <div className="mt-6 grid grid-cols-2 md:grid-cols-5 gap-3">
+                {[["Total", stats.total], ["Publicados", stats.publicados], ["Rascunho", stats.rascunho], ["Reservados", stats.reservados]].map(([l, n]) => (
+                  <div key={l} className="border border-[#EEEEEE] rounded-[16px] p-5 bg-white"><div className="text-[11px] uppercase tracking-widest text-neutral-500">{l}</div><div className="text-[28px] font-bold mt-2 mont">{n}</div></div>
+                ))}
+                <div className="border border-[#1A1A1A] rounded-[16px] p-5 bg-black text-white"><div className="text-[11px] uppercase tracking-widest text-neutral-400">Leads</div><div className="text-[28px] font-bold mt-2 mont">{leads.length}</div></div>
+              </div>
+              <div className="mt-8 border border-[#EEEEEE] rounded-[12px] p-6 text-[13px] text-neutral-600 bg-[#FAFAFA]">Os números vêm dos dados salvos no Supabase.</div>
+            </div>
+          )}
+
+          {/* ===== ADMIN: CONFIG ===== */}
+          {page === "admin-config" && (
+            <div className="px-6 md:px-10 py-8 max-w-[720px]">
+              <h2 className="text-[20px] font-semibold mont">Configurações</h2>
+              <div className="mt-6 border border-[#EEEEEE] rounded-[16px] p-6 bg-white">
+                <p className="text-[12px] font-semibold tracking-[0.04em]">CONTATO PADRÃO</p>
+                <div className="mt-4 grid gap-4">
+                  <div>
+                    <label className="text-[11px] tracking-widest uppercase text-neutral-600 font-medium">WhatsApp / Telefone</label>
+                    <input type="tel" value={cfgDraft.whatsapp} onChange={e => setCfgDraft({ ...cfgDraft, whatsapp: e.target.value })} placeholder="(84) 99999-9999" className="mt-1 w-full h-11 border border-[#EEEEEE] px-4 text-[13px] rounded-[12px] bg-white" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] tracking-widest uppercase text-neutral-600 font-medium">Email de contato (recebe os leads)</label>
+                    <input type="email" value={cfgDraft.email_contato} onChange={e => setCfgDraft({ ...cfgDraft, email_contato: e.target.value })} placeholder="vantamotorsrn@gmail.com" className="mt-1 w-full h-11 border border-[#EEEEEE] px-4 text-[13px] rounded-[12px] bg-white" />
+                  </div>
+                </div>
+                <div className="mt-6 flex gap-2">
+                  <button onClick={saveCfg} className="px-6 h-10 bg-[#D6B56D] text-black text-[12px] font-semibold rounded-full">Salvar configurações</button>
+                  <button onClick={() => setCfgDraft(cfg)} className="px-6 h-10 border border-[#EEEEEE] bg-white text-[12px] rounded-full">Cancelar</button>
+                </div>
+                <div className="mt-6 grid gap-2 text-[12px]">
+                  <div className="flex justify-between border border-[#EEEEEE] rounded-[10px] p-3 bg-[#FAFAFA]"><span className="text-neutral-500">WhatsApp atual</span><span className="font-medium">{cfg.whatsapp}</span></div>
+                  <div className="flex justify-between border border-[#EEEEEE] rounded-[10px] p-3 bg-[#FAFAFA]"><span className="text-neutral-500">Email atual</span><span className="font-medium">{cfg.email_contato}</span></div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ===== ADMIN: USUÁRIOS ===== */}
+          {page === "admin-usuarios" && (
+            <div className="px-6 md:px-10 py-8">
+              <h2 className="text-[20px] font-semibold mont">Usuários</h2>
+              <div className="mt-6 border border-[#EEEEEE] rounded-[16px] p-12 text-center text-[13px] bg-[#FAFAFA]">As contas ficam no Supabase (Authentication → Users).</div>
+            </div>
+          )}
+
+          {/* ===== ADMIN: LEADS ===== */}
+          {page === "admin-leads" && (
+            <div className="px-6 md:px-10 py-8">
+              <h2 className="text-[20px] font-semibold mont">Interessados</h2>
+              <p className="text-[12px] text-neutral-500 mt-1">Destino {cfg.email_contato} • salvos no Supabase</p>
+              <div className="mt-6 border border-[#EEEEEE] rounded-[16px] overflow-hidden bg-white">
+                {leads.length === 0
+                  ? <div className="p-12 text-center text-[13px] text-neutral-500">Nenhum interessado ainda.</div>
+                  : leads.map(l => (
+                    <div key={l.id} className="p-4 border-b border-[#EEEEEE] text-[13px] flex justify-between gap-4 last:border-0 items-start">
+                      <div className="flex-1">
+                        <span className="font-semibold">{l.nome}</span> — {l.whatsapp} — {l.email} — {l.interesse}<br />
+                        <span className="text-[11px] text-neutral-500">{l.mensagem}</span>
+                        {l.vehicle_id && <span className="ml-2 px-2 py-0.5 bg-[#FFF8E1] border border-[#F6E8B8] text-[10px] rounded-full">Veículo {l.vehicle_id}</span>}
+                        <div className="mt-2">
+                          <button onClick={async () => { setToast("Enviando..."); const err = await sendMail(l); setToast(err ? "Erro ao enviar: " + err : "Email enviado!"); }} className="px-3 h-7 bg-black text-white text-[11px] rounded-full">Reenviar para {cfg.email_contato}</button>
+                        </div>
+                      </div>
+                      <span className="text-[11px] text-neutral-500 whitespace-nowrap">{new Date(l.createdAt).toLocaleString()}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* FOOTER */}
+      <footer className="mt-auto bg-[#101010] text-white">
+        <div className="mx-auto max-w-[1440px] px-6 md:px-10 py-12 grid grid-cols-1 md:grid-cols-3 gap-10">
+          <div>
+            <div className="flex items-center gap-3"><Logo size={36} /><span className="tracking-[0.18em] text-[13px] font-bold mont">JOLUX MOTORS</span></div>
+            <p className="mt-4 text-[12px] leading-[1.6] text-[#A0A0A0] max-w-[260px]">Carros e motos em Mossoró/RN, com anúncios cadastrados e verificados pela nossa equipe.</p>
+            <div className="mt-5 text-[11px] leading-[1.8] text-[#A0A0A0] border border-[#1E1E1E] rounded-[10px] p-3 bg-[#171717]">
+              <div>WhatsApp: {cfg.whatsapp}</div><div>Email: {cfg.email_contato}</div>
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] tracking-[0.14em] font-semibold">NAVEGAÇÃO</div>
+            <div className="mt-4 flex flex-col gap-2 text-[12px] text-[#A0A0A0]">
+              {[["inicio", "Início"], ["catalogo", "Catálogo"], ["contato", "Contato"], ["privacidade", "Política de Privacidade"]].map(([id, l]) => <button key={id} onClick={() => go(id)} className="text-left hover:text-white">{l}</button>)}
+            </div>
+          </div>
+          <div>
+            <div className="text-[11px] tracking-[0.14em] font-semibold">STATUS</div>
+            <div className="mt-4 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#1A1A1A] border border-[#2A2A2A] text-[11px]">
+              <span className="w-2 h-2 rounded-full bg-[#22c55e]"></span> Login via Supabase
+            </div>
+          </div>
+        </div>
+        <div className="border-t border-[#1E1E1E] py-4 text-center text-[11px] text-[#6B6B6B] px-6">© 2026 JOLUX MOTORS • Mossoró/RN</div>
+      </footer>
+
+      {toast && <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] bg-black text-white px-5 py-3 text-[13px] rounded-full shadow-lg max-w-[90vw] text-center border border-[#2A2A2A]">{toast}</div>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
