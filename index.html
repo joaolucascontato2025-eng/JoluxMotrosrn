@@ -26,6 +26,8 @@ const { useState, useEffect, useMemo } = React;
 /* ================= CONFIG ================= */
 const SB_URL = "https://xwnxbafcwdijuzlutrzg.supabase.co";
 const SB_KEY = "sb_publishable_yOPkmQUDMUO7H58BxBg4CA_RXYfZ-dp";
+const SUPABASE_URL = SB_URL;
+const SUPABASE_KEY = SB_KEY;
 const ADMIN_EMAIL = "joaolucas.contato2025@gmail.com";
 const WEB3_KEY = "8f7fe0b1-d9c6-4a5e-b1cd-ecefdf2b2140";
 // Logo: coloque um arquivo logo.png na mesma pasta do index.html
@@ -38,6 +40,37 @@ const EMPTY = { tipo:"",condicao:"",marca:"",modelo:"",versao:"",categoria:"",an
 const EMPTY_CONTACT = { nome:"",whatsapp:"",email:"",interesse:"",mensagem:"",lgpd:false,vehicle_id:"",origem:"contato" };
 const DEFAULT_CFG = { whatsapp:"(84) 99999-9999", email_contato:"vantamotorsrn@gmail.com" };
 const emptyMsg = "Não temos veículos disponíveis no momento. Novos anúncios serão adicionados em breve.";
+
+/* ================= SUPABASE (banco de dados) ================= */
+// Pega o token do login; renova sozinho quando está perto de expirar.
+async function getToken() {
+  try {
+    const t = JSON.parse(localStorage.getItem("jolux_user") || "null");
+    if (!t || !t.access_token) return null;
+    if (t.expires_at && Date.now() < t.expires_at) return t.access_token;
+    if (!t.refresh_token) return null;
+    const r = await fetch(SB_URL + "/auth/v1/token?grant_type=refresh_token", {
+      method: "POST",
+      headers: { apikey: SB_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: t.refresh_token }),
+    });
+    const j = await r.json();
+    if (!r.ok || !j.access_token) return null;
+    const n = { ...t, access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Date.now() + (j.expires_in || 3600) * 1000 - 60000 };
+    localStorage.setItem("jolux_user", JSON.stringify(n));
+    return n.access_token;
+  } catch (e) { return null; }
+}
+// Chamada simples ao banco (REST do Supabase).
+async function sb(path, opts = {}) {
+  const token = await getToken();
+  const headers = { apikey: SB_KEY, "Content-Type": "application/json", Prefer: "return=representation", ...(opts.headers || {}) };
+  if (token) headers.Authorization = "Bearer " + token;
+  const r = await fetch(SB_URL + "/rest/v1" + path, { ...opts, headers });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.message || j.hint)) || "erro " + r.status);
+  return j;
+}
 
 /* ================= PEQUENOS COMPONENTES ================= */
 function Logo({ size = 36 }) {
@@ -72,7 +105,7 @@ function VehicleCard({ v, onInterest }) {
       <div className="p-4">
         <div className="text-[13px] font-semibold mont">{v.marca} {v.modelo} <span className="font-normal text-neutral-500">{v.versao}</span></div>
         <div className="text-[11px] text-neutral-500 mt-1">{v.tipo || "—"} • {v.categoria || "—"} • {v.anoFab || "—"}/{v.anoModelo || "—"} • {v.km ? v.km + " km" : "KM não informado"}</div>
-        {v.opcionais.length > 0 && (
+        {(v.opcionais || []).length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
             {v.opcionais.slice(0, 3).map((o, i) => <span key={i} className="px-2 py-0.5 border border-[#EEEEEE] rounded-full text-[10px]">{o}</span>)}
           </div>
@@ -119,7 +152,14 @@ function Auth({ onLogin }) {
   };
   const finish = (j, em) => {
     const u = j.user || {};
-    const t = { email: u.email || em, nome: (u.user_metadata && u.user_metadata.nome) || nome.trim(), exp: Date.now() + 6048e5 };
+    const t = {
+      email: u.email || em,
+      nome: (u.user_metadata && u.user_metadata.nome) || nome.trim(),
+      exp: Date.now() + 6048e5,
+      access_token: j.access_token,
+      refresh_token: j.refresh_token,
+      expires_at: Date.now() + (j.expires_in || 3600) * 1000 - 60000,
+    };
     try { localStorage.setItem("jolux_user", JSON.stringify(t)); } catch (e) {}
     setSenha(""); setCode(""); setMsg("");
     onLogin(t);
@@ -247,7 +287,11 @@ function App() {
   const [cfgDraft, setCfgDraft] = useState(DEFAULT_CFG);
   const [cForm, setCForm] = useState(EMPTY_CONTACT);
   const [user, setUser] = useState(() => {
-    try { const t = JSON.parse(localStorage.getItem("jolux_user") || "null"); return t && t.exp > Date.now() ? t : null; } catch (e) { return null; }
+    try {
+      const t = JSON.parse(localStorage.getItem("jolux_user") || "null");
+      // sessões antigas (sem token) são descartadas: é só entrar de novo
+      return t && t.exp > Date.now() && t.access_token ? t : null;
+    } catch (e) { return null; }
   });
 
   const isAdm = !!user && (user.email || "").toLowerCase() === ADMIN_EMAIL;
@@ -272,6 +316,28 @@ function App() {
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 4200); return () => clearTimeout(t); }, [toast]);
   useEffect(() => { setCfgDraft(cfg); }, [cfg]);
 
+  /* carregar dados do Supabase */
+  async function loadVehicles() {
+    try {
+      const rows = await sb("/veiculos_site?select=*&order=created_at.desc");
+      setVehicles((rows || []).map(r => ({ ...EMPTY, ...r.dados, id: r.id, status: r.status, createdAt: new Date(r.created_at).getTime() })));
+    } catch (e) { setToast("Não foi possível carregar os veículos: " + e.message); }
+  }
+  async function loadLeads() {
+    try {
+      const rows = await sb("/leads_site?select=*&order=created_at.desc");
+      setLeads((rows || []).map(r => ({ ...r.dados, id: r.id })));
+    } catch (e) { setToast("Não foi possível carregar os interessados: " + e.message); }
+  }
+  async function loadCfg() {
+    try {
+      const rows = await sb("/config_site?id=eq.geral&select=dados");
+      if (rows && rows[0] && rows[0].dados) setCfg({ ...DEFAULT_CFG, ...rows[0].dados });
+    } catch (e) {}
+  }
+  useEffect(() => { loadCfg(); }, []);
+  useEffect(() => { loadVehicles(); if (isAdm) loadLeads(); else setLeads([]); }, [user]);
+
   const logout = () => { try { localStorage.removeItem("jolux_user"); } catch (e) {} setUser(null); go("inicio"); };
 
   /* dados derivados */
@@ -293,14 +359,32 @@ function App() {
     reservados: vehicles.filter(v => v.status === "reservado").length,
   };
 
-  /* veículos */
+  /* veículos (salvos no Supabase) */
   const resetForm = () => { setForm(EMPTY); setOptInput(""); setEditId(null); };
-  function saveVehicle() {
+  async function saveVehicle() {
     if (!form.marca.trim() || !form.modelo.trim()) { setToast("Marca e Modelo são obrigatórios."); return; }
-    if (editId) setVehicles(vs => vs.map(v => v.id === editId ? { ...v, ...form } : v));
-    else setVehicles(vs => [{ ...form, id: uid(), createdAt: Date.now() }, ...vs]);
-    setToast(editId ? "Veículo atualizado em memória." : "Veículo adicionado.");
-    resetForm(); setModal(false);
+    const { id, createdAt, ...dados } = form;
+    dados.fotos = (dados.fotos || []).filter(f => !String(f).startsWith("blob:"));
+    try {
+      if (editId) {
+        const res = await sb("/veiculos_site?id=eq." + encodeURIComponent(editId), { method: "PATCH", body: JSON.stringify({ status: form.status, dados }) });
+        if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      } else {
+        await sb("/veiculos_site", { method: "POST", body: JSON.stringify({ id: uid(), status: form.status, dados }) });
+      }
+      await loadVehicles();
+      setToast(editId ? "Veículo atualizado." : "Veículo salvo.");
+      resetForm(); setModal(false);
+    } catch (e) { setToast("Erro ao salvar: " + e.message); }
+  }
+  async function removeVehicle(id) {
+    if (!confirm("Remover este veículo?")) return;
+    try {
+      const res = await sb("/veiculos_site?id=eq." + encodeURIComponent(id), { method: "DELETE" });
+      if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      await loadVehicles();
+      setToast("Veículo removido.");
+    } catch (e) { setToast("Erro ao remover: " + e.message); }
   }
   const editVehicle = v => { setForm(v); setEditId(v.id); setModal(true); };
   function addOpt() {
@@ -337,6 +421,11 @@ function App() {
       return r.ok && j.success !== false ? null : (j.message || "tente novamente");
     } catch (e) { return "erro de conexão"; }
   }
+  async function saveLead(l) {
+    try {
+      await sb("/leads_site", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ id: l.id, dados: l }) });
+    } catch (e) { /* o e-mail é o principal; se o banco falhar, não atrapalha o visitante */ }
+  }
   async function submitContact(ev) {
     ev.preventDefault();
     if (!cForm.lgpd) { setToast("Aceite LGPD para continuar."); return; }
@@ -348,6 +437,7 @@ function App() {
     };
     setLeads(l => [lead, ...l]);
     setToast("Enviando...");
+    saveLead(lead);
     const err = await sendMail(lead);
     if (err) setToast("Erro ao enviar: " + err + ". Fale pelo WhatsApp: " + cfg.whatsapp);
     else { setToast("Mensagem enviada! Em breve entraremos em contato."); setCForm(EMPTY_CONTACT); setSel(null); }
@@ -357,11 +447,19 @@ function App() {
     const n = (cfg.whatsapp || "").replace(/\D/g, "");
     window.open(`https://wa.me/${n.startsWith("55") ? n : "55" + n}?text=${encodeURIComponent(txt)}`, "_blank");
   }
-  function saveCfg() {
+  async function saveCfg() {
     const w = cfgDraft.whatsapp.trim(), e = cfgDraft.email_contato.trim();
     if (!e.includes("@")) { setToast("Email de contato inválido."); return; }
     const next = { whatsapp: w || cfg.whatsapp, email_contato: e };
-    setCfg(next); setToast(`Configuração salva: WhatsApp ${next.whatsapp} / Email ${next.email_contato}`);
+    try {
+      await sb("/config_site", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify({ id: "geral", dados: next, updated_at: new Date().toISOString() }),
+      });
+      setCfg(next);
+      setToast(`Configuração salva: WhatsApp ${next.whatsapp} / Email ${next.email_contato}`);
+    } catch (err) { setToast("Erro ao salvar configuração: " + err.message); }
   }
 
   /* telas reutilizáveis */
@@ -456,7 +554,7 @@ function App() {
             </div>
             <div className="p-4">
               <button onClick={logout} className="w-full h-10 border border-[#EEEEEE] rounded-full text-[13px] hover:bg-neutral-50">Sair</button>
-              <div className="mt-4 text-[10px] text-neutral-400 leading-relaxed">Edição em memória.<br />JOLUX MOTORS</div>
+              <div className="mt-4 text-[10px] text-neutral-400 leading-relaxed">Dados salvos no Supabase.<br />JOLUX MOTORS</div>
             </div>
           </aside>
         )}
@@ -643,7 +741,7 @@ function App() {
                       <span className={"inline-flex px-2 py-1 rounded-full text-[11px] border w-fit " + (v.status === "publicado" ? "bg-black text-white border-black" : "bg-white")}>{v.status}</span>
                       <div className="flex gap-3">
                         <button onClick={() => editVehicle(v)} className="text-[12px] underline">Editar</button>
-                        <button onClick={() => setVehicles(vs => vs.filter(x => x.id !== v.id))} className="text-[12px] text-red-500">Remover</button>
+                        <button onClick={() => removeVehicle(v.id)} className="text-[12px] text-red-500">Remover</button>
                       </div>
                     </div>
                   ))}
@@ -749,7 +847,7 @@ function App() {
                 ))}
                 <div className="border border-[#1A1A1A] rounded-[16px] p-5 bg-black text-white"><div className="text-[11px] uppercase tracking-widest text-neutral-400">Leads</div><div className="text-[28px] font-bold mt-2 mont">{leads.length}</div></div>
               </div>
-              <div className="mt-8 border border-[#EEEEEE] rounded-[12px] p-6 text-[13px] text-neutral-600 bg-[#FAFAFA]">Os números vêm do estado em memória desta sessão.</div>
+              <div className="mt-8 border border-[#EEEEEE] rounded-[12px] p-6 text-[13px] text-neutral-600 bg-[#FAFAFA]">Os números vêm dos dados salvos no Supabase.</div>
             </div>
           )}
 
@@ -793,10 +891,10 @@ function App() {
           {page === "admin-leads" && (
             <div className="px-6 md:px-10 py-8">
               <h2 className="text-[20px] font-semibold mont">Interessados</h2>
-              <p className="text-[12px] text-neutral-500 mt-1">Destino {cfg.email_contato} • guardados em memória nesta sessão</p>
+              <p className="text-[12px] text-neutral-500 mt-1">Destino {cfg.email_contato} • salvos no Supabase</p>
               <div className="mt-6 border border-[#EEEEEE] rounded-[16px] overflow-hidden bg-white">
                 {leads.length === 0
-                  ? <div className="p-12 text-center text-[13px] text-neutral-500">Nenhum lead nesta sessão.</div>
+                  ? <div className="p-12 text-center text-[13px] text-neutral-500">Nenhum interessado ainda.</div>
                   : leads.map(l => (
                     <div key={l.id} className="p-4 border-b border-[#EEEEEE] text-[13px] flex justify-between gap-4 last:border-0 items-start">
                       <div className="flex-1">
@@ -807,7 +905,7 @@ function App() {
                           <button onClick={async () => { setToast("Enviando..."); const err = await sendMail(l); setToast(err ? "Erro ao enviar: " + err : "Email enviado!"); }} className="px-3 h-7 bg-black text-white text-[11px] rounded-full">Reenviar para {cfg.email_contato}</button>
                         </div>
                       </div>
-                      <span className="text-[11px] text-neutral-500 whitespace-nowrap">{new Date(l.createdAt).toLocaleTimeString()}</span>
+                      <span className="text-[11px] text-neutral-500 whitespace-nowrap">{new Date(l.createdAt).toLocaleString()}</span>
                     </div>
                   ))}
               </div>
