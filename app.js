@@ -149,7 +149,7 @@ function waLink(numero, v) {
     v.cor ? "Cor: " + v.cor : null,
     "Código do anúncio: " + v.id,
     "",
-    "Ele ainda está disponível? Gostaria de saber valores, formas de pagamento e agendar uma visita.",
+    ""Ele ainda está disponível? Gostaria de saber o valor e mais informações sobre o veículo."
   ].filter(l => l !== null);
   return "https://wa.me/" + full + "?text=" + encodeURIComponent(linhas.join("\n"));
 }
