@@ -484,6 +484,25 @@ function App() {
       setToast("Veículo removido.");
     } catch (e) { setToast("Erro ao remover: " + e.message); }
   }
+  async function removeLead(id) {
+    if (!confirm("Excluir este interessado?")) return;
+    try {
+      const res = await sb("/leads_site?id=eq." + encodeURIComponent(id), { method: "DELETE" });
+      if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      setLeads(l => l.filter(x => x.id !== id));
+      setToast("Interessado excluído.");
+    } catch (e) { setToast("Erro ao excluir: " + e.message); }
+  }
+  async function clearLeads() {
+    if (!leads.length) return;
+    if (!confirm("Excluir TODOS os " + leads.length + " interessados? Não dá para desfazer.")) return;
+    try {
+      const res = await sb("/leads_site?id=not.is.null", { method: "DELETE" });
+      if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      setLeads([]);
+      setToast("Todos os interessados foram excluídos.");
+    } catch (e) { setToast("Erro ao excluir: " + e.message); }
+  }
   const editVehicle = v => { setForm(v); setEditId(v.id); setModal(true); };
   function addOpt() {
     const t = optInput.trim(); if (!t) return;
@@ -1026,7 +1045,7 @@ function App() {
           {/* ===== ADMIN: LEADS ===== */}
           {page === "admin-leads" && (
             <div className="px-6 md:px-10 py-8">
-              <h2 className="text-[20px] font-semibold mont">Interessados</h2>
+              <div className="flex items-center justify-between gap-4"><h2 className="text-[20px] font-semibold mont">Interessados</h2>{leads.length > 0 && <button onClick={clearLeads} className="px-4 h-8 border border-red-300 text-red-600 text-[12px] rounded-full">Limpar todos</button>}</div>
               <p className="text-[12px] text-neutral-500 mt-1">Destino {cfg.email_contato} • salvos no Supabase</p>
               <div className="mt-6 border border-[#EEEEEE] rounded-[16px] overflow-hidden bg-white">
                 {leads.length === 0
@@ -1038,7 +1057,7 @@ function App() {
                         <span className="text-[11px] text-neutral-500">{l.mensagem}</span>
                         {l.vehicle_id && <span className="ml-2 px-2 py-0.5 bg-[#FFF8E1] border border-[#F6E8B8] text-[10px] rounded-full">Veículo {l.vehicle_id}</span>}
                         <div className="mt-2">
-                          <button onClick={async () => { setToast("Enviando..."); const err = await sendMail(l); setToast(err ? "Erro ao enviar: " + err : "Email enviado!"); }} className="px-3 h-7 bg-black text-white text-[11px] rounded-full">Reenviar para {cfg.email_contato}</button>
+                          <button onClick={async () => { setToast("Enviando..."); const err = await sendMail(l); setToast(err ? "Erro ao enviar: " + err : "Email enviado!"); }} className="px-3 h-7 bg-black text-white text-[11px] rounded-full">Reenviar para {cfg.email_contato}</button><button onClick={() => removeLead(l.id)} className="ml-2 px-3 h-7 border border-red-300 text-red-600 text-[11px] rounded-full">Excluir</button>
                         </div>
                       </div>
                       <span className="text-[11px] text-neutral-500 whitespace-nowrap">{new Date(l.createdAt).toLocaleString()}</span>
