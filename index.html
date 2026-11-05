@@ -34,7 +34,7 @@ const WEB3_KEY = "8f7fe0b1-d9c6-4a5e-b1cd-ecefdf2b2140";
 // (ou cole aqui o seu "data:image/...;base64,..." antigo)
 const LOGO = "logo.png";
 const GOLD = "#D6B56D";
-const PAGES = ["inicio","catalogo","contato","conta","admin-dashboard","admin-veiculos","admin-config","admin-usuarios","admin-leads"];
+const PAGES = ["inicio","catalogo","contato","conta","privacidade","admin-dashboard","admin-veiculos","admin-config","admin-usuarios","admin-leads"];
 const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
 const EMPTY = { tipo:"",condicao:"",marca:"",modelo:"",versao:"",categoria:"",anoFab:"",anoModelo:"",km:"",combustivel:"",cambio:"",cor:"",descricao:"",opcionais:[],anunciante:"",telefone:"",status:"rascunho",fotos:[] };
 const EMPTY_CONTACT = { nome:"",whatsapp:"",email:"",interesse:"",mensagem:"",lgpd:false,vehicle_id:"",origem:"contato" };
@@ -70,6 +70,51 @@ async function sb(path, opts = {}) {
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error((j && (j.message || j.hint)) || "erro " + r.status);
   return j;
+}
+
+/* ================= FOTOS (Supabase Storage) ================= */
+const BUCKET = "veiculos";
+const MAX_FOTOS = 10;
+// Reduz a foto (máx. 1600px, JPEG) para enviar rápido e gastar pouco espaço.
+function compressImage(file, max = 1600, q = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(b => { URL.revokeObjectURL(url); b ? resolve(b) : reject(new Error("falha ao processar a imagem")); }, "image/jpeg", q);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("imagem inválida")); };
+    img.src = url;
+  });
+}
+async function uploadFoto(blob) {
+  const token = await getToken();
+  if (!token) throw new Error("entre como admin para enviar fotos");
+  const path = uid() + Date.now().toString(36) + ".jpg";
+  const r = await fetch(SB_URL + "/storage/v1/object/" + BUCKET + "/" + path, {
+    method: "POST",
+    headers: { apikey: SB_KEY, Authorization: "Bearer " + token, "Content-Type": "image/jpeg" },
+    body: blob,
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.message || j.error)) || "erro " + r.status);
+  return SB_URL + "/storage/v1/object/public/" + BUCKET + "/" + path;
+}
+async function deleteFoto(url) {
+  try {
+    const marca = "/object/public/" + BUCKET + "/";
+    const i = String(url).indexOf(marca);
+    if (i < 0) return;
+    const token = await getToken();
+    if (!token) return;
+    await fetch(SB_URL + "/storage/v1/object/" + BUCKET + "/" + String(url).slice(i + marca.length), {
+      method: "DELETE", headers: { apikey: SB_KEY, Authorization: "Bearer " + token },
+    });
+  } catch (e) {}
 }
 
 /* ================= CPF / TELEFONE ================= */
@@ -117,12 +162,22 @@ function SectionTitle({ title }) {
   return <div className="text-[11px] tracking-[0.14em] font-semibold text-neutral-700 border-b border-[#EEEEEE] pb-2">{title}</div>;
 }
 function VehicleCard({ v, onInterest }) {
+  const [fi, setFi] = useState(0);
+  const fotos = v.fotos || [];
+  const n = fotos.length;
   return (
     <div className="border border-[#EEEEEE] bg-white hover:border-[#D6B56D] transition-colors rounded-[16px] overflow-hidden">
       <div className="aspect-[16/10] bg-[#FAFAFA] border-b border-[#EEEEEE] overflow-hidden flex items-center justify-center relative">
-        {v.fotos && v.fotos[0]
-          ? <img src={v.fotos[0]} alt={v.marca + " " + v.modelo} className="w-full h-full object-cover" />
+        {n > 0
+          ? <img src={fotos[fi % n]} alt={v.marca + " " + v.modelo} className="w-full h-full object-cover" />
           : <div className="text-center"><div className="text-[11px] tracking-widest text-neutral-400">ÁREA PARA FOTO</div><div className="text-[10px] text-neutral-400 mt-1">Adicionar no Admin</div></div>}
+        {n > 1 && (
+          <>
+            <button type="button" onClick={() => setFi((fi - 1 + n) % n)} className="absolute left-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-white/90 border border-[#EEEEEE] text-[14px] leading-none">‹</button>
+            <button type="button" onClick={() => setFi((fi + 1) % n)} className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-full bg-white/90 border border-[#EEEEEE] text-[14px] leading-none">›</button>
+            <span className="absolute bottom-2 right-2 px-2 py-0.5 bg-black text-white text-[10px] rounded-full">{(fi % n) + 1}/{n}</span>
+          </>
+        )}
         <span className="absolute top-2 left-2 px-2 py-1 bg-white border border-[#EEEEEE] text-[10px] uppercase tracking-widest rounded-full">{v.status}</span>
       </div>
       <div className="p-4">
@@ -150,6 +205,7 @@ function authErr(j) {
   if (/already registered/i.test(m)) return "Este email já tem conta. Use Entrar.";
   if (/at least|weak/i.test(m)) return "A senha precisa ter pelo menos 6 caracteres.";
   if (/rate limit|too many|seconds/i.test(m)) return "Muitas tentativas. Aguarde um pouco e tente de novo.";
+  if (/database error|duplicate|unique/i.test(m)) return "Não foi possível criar a conta. Esse CPF ou e-mail já pode estar cadastrado.";
   if (/expired|invalid/i.test(m)) return "Código incorreto ou expirado. Confira ou peça um novo.";
   return "Não foi possível concluir. Tente novamente.";
 }
@@ -160,6 +216,7 @@ function Auth({ onLogin }) {
   const [nome, setNome] = useState("");
   const [cpf, setCpf] = useState("");
   const [tel, setTel] = useState("");
+  const [lgpd, setLgpd] = useState(false);
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
   const [code, setCode] = useState("");
@@ -186,7 +243,7 @@ function Auth({ onLogin }) {
       expires_at: Date.now() + (j.expires_in || 3600) * 1000 - 60000,
     };
     try { localStorage.setItem("jolux_user", JSON.stringify(t)); } catch (e) {}
-    setSenha(""); setCode(""); setMsg(""); setCpf(""); setTel("");
+    setSenha(""); setCode(""); setMsg(""); setCpf(""); setTel(""); setLgpd(false);
     onLogin(t);
   };
 
@@ -210,7 +267,8 @@ function Auth({ onLogin }) {
         if (!validCPF(cpf)) { say("CPF inválido. Confira os números."); return; }
         const td = onlyDigits(tel);
         if (td.length < 10 || td.length > 11) { say("Digite um telefone válido, com DDD."); return; }
-        const { ok, j } = await post("/auth/v1/signup", { email: em, password: senha, data: { nome: nome.trim(), cpf: onlyDigits(cpf), telefone: td } });
+        if (!lgpd) { say("Aceite a Política de Privacidade para criar a conta."); return; }
+        const { ok, j } = await post("/auth/v1/signup", { email: em, password: senha, data: { nome: nome.trim(), cpf: onlyDigits(cpf), telefone: td, lgpd_aceito: true, lgpd_em: new Date().toISOString() } });
         if (ok && j.access_token) finish(j, em);
         else if (ok && (j.id || j.user)) {
           // entra direto (funciona quando "Confirm email" está desligado no Supabase)
@@ -283,6 +341,13 @@ function Auth({ onLogin }) {
       {["login","signup","newpass"].includes(mode) && <input type="password" value={senha} onChange={e => setSenha(e.target.value)} placeholder={mode === "newpass" ? "Nova senha" : "Senha"} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={6} required className={inp} />}
       {(mode === "verify" || mode === "verifyrec") && <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} placeholder="Código" required className={inp + " text-center tracking-[0.3em]"} />}
 
+      {mode === "signup" && (
+        <label className="mt-4 flex gap-2 items-start text-[11px] text-neutral-600 leading-relaxed">
+          <input type="checkbox" checked={lgpd} onChange={e => setLgpd(e.target.checked)} required className="mt-0.5" />
+          <span>Li e concordo com a <a href="#privacidade" target="_blank" rel="noopener" className="underline">Política de Privacidade</a> e com o uso dos meus dados (nome, CPF, telefone e e-mail) para cadastro e contato, conforme a LGPD.</span>
+        </label>
+      )}
+
       {msg && <div className="mt-3 text-[12px]" style={{ color: good ? "#15803d" : "#dc2626" }}>{msg}</div>}
 
       <button type="submit" disabled={busy} className="mt-5 w-full h-11 bg-black text-white text-[13px] font-semibold rounded-full" style={{ opacity: busy ? 0.6 : 1 }}>
@@ -317,6 +382,7 @@ function App() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(EMPTY);
   const [optInput, setOptInput] = useState("");
+  const [uploading, setUploading] = useState(false);
   const [toast, setToast] = useState(null);
   const [sel, setSel] = useState(null);
   const [cfg, setCfg] = useState(DEFAULT_CFG);
@@ -398,9 +464,10 @@ function App() {
   /* veículos (salvos no Supabase) */
   const resetForm = () => { setForm(EMPTY); setOptInput(""); setEditId(null); };
   async function saveVehicle() {
+    if (uploading) { setToast("Aguarde o envio das fotos terminar."); return; }
     if (!form.marca.trim() || !form.modelo.trim()) { setToast("Marca e Modelo são obrigatórios."); return; }
     const { id, createdAt, ...dados } = form;
-    dados.fotos = (dados.fotos || []).filter(f => !String(f).startsWith("blob:"));
+    dados.fotos = (dados.fotos || []).filter(f => /^https?:/.test(String(f)));
     try {
       if (editId) {
         const res = await sb("/veiculos_site?id=eq." + encodeURIComponent(editId), { method: "PATCH", body: JSON.stringify({ status: form.status, dados }) });
@@ -418,6 +485,8 @@ function App() {
     try {
       const res = await sb("/veiculos_site?id=eq." + encodeURIComponent(id), { method: "DELETE" });
       if (!res || !res.length) throw new Error("sem permissão. Saia e entre de novo como admin.");
+      const antigo = vehicles.find(x => x.id === id);
+      if (antigo) await Promise.all((antigo.fotos || []).map(deleteFoto));
       await loadVehicles();
       setToast("Veículo removido.");
     } catch (e) { setToast("Erro ao remover: " + e.message); }
@@ -427,10 +496,19 @@ function App() {
     const t = optInput.trim(); if (!t) return;
     setForm(f => ({ ...f, opcionais: [...(f.opcionais || []), t] })); setOptInput("");
   }
-  function addPhotos(e) {
-    const files = e.target.files; if (!files) return;
-    const urls = Array.from(files).map(f => URL.createObjectURL(f));
-    setForm(f => ({ ...f, fotos: [...(f.fotos || []), ...urls] }));
+  async function addPhotos(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    if ((form.fotos || []).length + files.length > MAX_FOTOS) { setToast("Máximo de " + MAX_FOTOS + " fotos por veículo."); return; }
+    setUploading(true);
+    try {
+      const urls = [];
+      for (const f of files) urls.push(await uploadFoto(await compressImage(f)));
+      setForm(fm => ({ ...fm, fotos: [...(fm.fotos || []), ...urls] }));
+      setToast(urls.length === 1 ? "Foto enviada." : urls.length + " fotos enviadas.");
+    } catch (err) { setToast("Erro ao enviar foto: " + err.message); }
+    finally { setUploading(false); }
   }
 
   /* interesse / contato */
@@ -527,7 +605,7 @@ function App() {
     );
   }
 
-  const crumb = page === "inicio" ? "Início" : page === "catalogo" ? "Catálogo" : page === "contato" ? "Contato" : page === "conta" ? "Conta" : page.replace("admin-", "Admin / ");
+  const crumb = page === "inicio" ? "Início" : page === "catalogo" ? "Catálogo" : page === "contato" ? "Contato" : page === "conta" ? "Conta" : page === "privacidade" ? "Privacidade" : page.replace("admin-", "Admin / ");
   const navBtn = (id, label) => <button onClick={() => go(id)} className={"hover:opacity-60 " + (page === id ? "font-semibold" : "font-normal")}>{label}</button>;
   const adminNav = [["admin-dashboard","Dashboard"],["admin-veiculos","Veículos"],["admin-usuarios","Usuários"],["admin-leads","Interessados"],["admin-config","Configurações"]];
   const pill = "rounded-full";
@@ -738,13 +816,36 @@ function App() {
                 </div>
                 <label className="flex gap-2 items-start text-[11px] text-neutral-600">
                   <input type="checkbox" checked={cForm.lgpd} onChange={e => setCForm({ ...cForm, lgpd: e.target.checked })} className="mt-1" />
-                  Concordo com o uso dos dados para contato conforme LGPD. *
+                  Concordo com o uso dos dados para contato conforme a <a href="#privacidade" target="_blank" rel="noopener" className="underline">Política de Privacidade</a> (LGPD). *
                 </label>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <button type="submit" className="h-11 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full hover:brightness-95">Enviar mensagem</button>
                   <button type="button" onClick={openWhatsApp} className="h-11 bg-black text-white text-[13px] font-semibold rounded-full hover:opacity-90">WhatsApp {cfg.whatsapp}</button>
                 </div>
               </form>
+            </div>
+          )}
+
+          {/* ===== POLÍTICA DE PRIVACIDADE ===== */}
+          {page === "privacidade" && (
+            <div className="px-6 md:px-10 py-10 max-w-[760px]">
+              <h2 className="text-[22px] font-semibold mont">Política de Privacidade</h2>
+              <p className="mt-2 text-[12px] text-neutral-500">Última atualização: novembro de 2026</p>
+              <div className="mt-6 grid gap-6 text-[13px] leading-[1.7] text-neutral-700">
+                {[
+                  ["1. Quem somos", "A JOLUX MOTORS, de Mossoró/RN, é responsável pelo tratamento dos dados pessoais coletados neste site, conforme a Lei Geral de Proteção de Dados (Lei 13.709/2018, a LGPD)."],
+                  ["2. Quais dados coletamos", "No cadastro: nome completo, CPF, telefone, e-mail e senha. No formulário de contato: nome, WhatsApp, e-mail (opcional), interesse e mensagem. Também guardamos no seu navegador as informações necessárias para manter você conectado."],
+                  ["3. Para que usamos", "Para criar e manter a sua conta, evitar cadastros duplicados, responder aos seus contatos e interesses em veículos e prestar atendimento. Não usamos os seus dados para outras finalidades sem avisar você."],
+                  ["4. Base legal", "O tratamento é feito com o seu consentimento, dado ao marcar a caixa de aceite, e para atender pedidos feitos por você."],
+                  ["5. Compartilhamento", "Não vendemos os seus dados. Usamos serviços de terceiros para o site funcionar: Supabase (banco de dados e login), Vercel (hospedagem) e Web3Forms (envio das mensagens de contato por e-mail). Esses serviços tratam os dados apenas para nos prestar o serviço."],
+                  ["6. Por quanto tempo guardamos", "Mantemos os seus dados enquanto a sua conta estiver ativa ou enquanto forem necessários para o atendimento. Você pode pedir a exclusão a qualquer momento."],
+                  ["7. Seus direitos", "Você pode pedir a confirmação de que tratamos os seus dados, o acesso, a correção, a exclusão, a portabilidade e a revogação do consentimento, conforme o art. 18 da LGPD."],
+                  ["8. Segurança", "A senha é guardada de forma criptografada pelo serviço de login, e o acesso aos dados de cadastro e de contatos é restrito à nossa equipe."],
+                  ["9. Fale com a gente", "Para exercer os seus direitos ou tirar dúvidas sobre esta política, escreva para " + cfg.email_contato + "."],
+                ].map(([t, txt]) => (
+                  <section key={t}><h3 className="font-semibold text-black">{t}</h3><p className="mt-1">{txt}</p></section>
+                ))}
+              </div>
             </div>
           )}
 
@@ -845,9 +946,9 @@ function App() {
                         <div className="border border-[#EEEEEE] p-3 rounded-[12px]">
                           <div className="bg-[#FAFAFA] border border-[#EEEEEE] rounded-[10px] h-[160px] flex flex-col items-center justify-center text-[12px] text-neutral-500">
                             <span>ÁREA PARA FOTO</span>
-                            <span className="text-[11px] mt-1">Pré-visualização local (não persiste)</span>
-                            <label className="mt-3 px-4 h-8 bg-black text-white text-[11px] rounded-full flex items-center cursor-pointer">
-                              Selecionar fotos<input type="file" multiple accept="image/*" className="hidden" onChange={addPhotos} />
+                            <span className="text-[11px] mt-1">Até {MAX_FOTOS} fotos • salvas no Supabase</span>
+                            <label className={"mt-3 px-4 h-8 bg-black text-white text-[11px] rounded-full flex items-center " + (uploading ? "opacity-60" : "cursor-pointer")}>
+                              {uploading ? "Enviando..." : "Selecionar fotos"}<input type="file" multiple accept="image/*" disabled={uploading} className="hidden" onChange={addPhotos} />
                             </label>
                           </div>
                           {form.fotos && form.fotos.length > 0 && (
@@ -865,7 +966,7 @@ function App() {
                     </div>
                     <div className="sticky bottom-0 bg-white border-t border-[#EEEEEE] p-4 flex justify-end gap-2">
                       <button onClick={() => { setModal(false); resetForm(); }} className="px-6 h-10 border border-[#EEEEEE] text-[13px] rounded-full bg-white">Cancelar</button>
-                      <button onClick={saveVehicle} className="px-7 h-10 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full">Salvar veículo</button>
+                      <button onClick={saveVehicle} disabled={uploading} className="px-7 h-10 bg-[#D6B56D] text-black text-[13px] font-semibold rounded-full" style={{ opacity: uploading ? 0.6 : 1 }}>Salvar veículo</button>
                     </div>
                   </div>
                 </div>
@@ -963,7 +1064,7 @@ function App() {
           <div>
             <div className="text-[11px] tracking-[0.14em] font-semibold">NAVEGAÇÃO</div>
             <div className="mt-4 flex flex-col gap-2 text-[12px] text-[#A0A0A0]">
-              {[["inicio", "Início"], ["catalogo", "Catálogo"], ["contato", "Contato"]].map(([id, l]) => <button key={id} onClick={() => go(id)} className="text-left hover:text-white">{l}</button>)}
+              {[["inicio", "Início"], ["catalogo", "Catálogo"], ["contato", "Contato"], ["privacidade", "Política de Privacidade"]].map(([id, l]) => <button key={id} onClick={() => go(id)} className="text-left hover:text-white">{l}</button>)}
             </div>
           </div>
           <div>
