@@ -72,6 +72,29 @@ async function sb(path, opts = {}) {
   return j;
 }
 
+/* ================= CPF / TELEFONE ================= */
+const onlyDigits = v => String(v || "").replace(/\D/g, "");
+const maskCPF = v => onlyDigits(v).slice(0, 11)
+  .replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+const maskPhone = v => {
+  const d = onlyDigits(v).slice(0, 11);
+  if (!d) return "";
+  if (d.length <= 2) return "(" + d;
+  if (d.length <= 6) return "(" + d.slice(0, 2) + ") " + d.slice(2);
+  if (d.length <= 10) return "(" + d.slice(0, 2) + ") " + d.slice(2, 6) + "-" + d.slice(6);
+  return "(" + d.slice(0, 2) + ") " + d.slice(2, 7) + "-" + d.slice(7);
+};
+function validCPF(v) {
+  const c = onlyDigits(v);
+  if (c.length !== 11 || /^(\d)\1{10}$/.test(c)) return false;
+  for (let t = 9; t < 11; t++) {
+    let sum = 0;
+    for (let i = 0; i < t; i++) sum += Number(c[i]) * (t + 1 - i);
+    if (((sum * 10) % 11) % 10 !== Number(c[t])) return false;
+  }
+  return true;
+}
+
 /* ================= PEQUENOS COMPONENTES ================= */
 function Logo({ size = 36 }) {
   return (
@@ -135,6 +158,8 @@ function Auth({ onLogin }) {
   // modos: login | signup | verify | forgot | verifyrec | newpass
   const [mode, setMode] = useState("login");
   const [nome, setNome] = useState("");
+  const [cpf, setCpf] = useState("");
+  const [tel, setTel] = useState("");
   const [email, setEmail] = useState("");
   const [senha, setSenha] = useState("");
   const [code, setCode] = useState("");
@@ -161,7 +186,7 @@ function Auth({ onLogin }) {
       expires_at: Date.now() + (j.expires_in || 3600) * 1000 - 60000,
     };
     try { localStorage.setItem("jolux_user", JSON.stringify(t)); } catch (e) {}
-    setSenha(""); setCode(""); setMsg("");
+    setSenha(""); setCode(""); setMsg(""); setCpf(""); setTel("");
     onLogin(t);
   };
 
@@ -180,10 +205,19 @@ function Auth({ onLogin }) {
         } else say(authErr(j));
       }
       else if (mode === "signup") {
-        if (nome.trim().length < 2) { say("Digite seu nome."); return; }
-        const { ok, j } = await post("/auth/v1/signup", { email: em, password: senha, data: { nome: nome.trim() } });
+        const partes = nome.trim().split(/\s+/);
+        if (partes.length < 2 || partes.some(p => p.length < 2)) { say("Digite seu nome completo (nome e sobrenome)."); return; }
+        if (!validCPF(cpf)) { say("CPF inválido. Confira os números."); return; }
+        const td = onlyDigits(tel);
+        if (td.length < 10 || td.length > 11) { say("Digite um telefone válido, com DDD."); return; }
+        const { ok, j } = await post("/auth/v1/signup", { email: em, password: senha, data: { nome: nome.trim(), cpf: onlyDigits(cpf), telefone: td } });
         if (ok && j.access_token) finish(j, em);
-        else if (ok && (j.id || j.user)) { setMode("verify"); setCode(""); say("Enviamos um código para " + em + ". Digite abaixo para ativar sua conta.", true); }
+        else if (ok && (j.id || j.user)) {
+          // entra direto (funciona quando "Confirm email" está desligado no Supabase)
+          const lg = await post("/auth/v1/token?grant_type=password", { email: em, password: senha });
+          if (lg.ok && lg.j.access_token) finish(lg.j, em);
+          else say("Conta criada, mas o Supabase ainda exige confirmação por código. Desligue 'Confirm email' em Authentication → Providers → Email.");
+        }
         else say(authErr(j));
       }
       else if (mode === "verify") {
@@ -228,13 +262,13 @@ function Auth({ onLogin }) {
   const titles = { login:"Entrar", signup:"Criar conta", verify:"Confirmar email", forgot:"Recuperar senha", verifyrec:"Confirmar código", newpass:"Nova senha" };
   const subs = {
     login:"Entre com seu email e senha.",
-    signup:"Crie sua conta para falar com a gente e acompanhar seus interesses.",
+    signup:"Preencha todos os campos para criar sua conta.",
     verify:"Digite o código que enviamos para " + email + ".",
     forgot:"Digite seu email para receber um código.",
     verifyrec:"Digite o código que enviamos para " + email + ".",
     newpass:"Escolha uma nova senha.",
   };
-  const btns = { login:"Entrar", signup:"Enviar código", verify:"Confirmar e criar conta", forgot:"Enviar código", verifyrec:"Confirmar código", newpass:"Salvar nova senha" };
+  const btns = { login:"Entrar", signup:"Criar conta", verify:"Confirmar e criar conta", forgot:"Enviar código", verifyrec:"Confirmar código", newpass:"Salvar nova senha" };
 
   return (
     <form onSubmit={submit} className="w-full border border-[#EEEEEE] bg-white" style={{ maxWidth: 380, padding: 32, borderRadius: 16 }}>
@@ -242,7 +276,9 @@ function Auth({ onLogin }) {
       <h1 className="mt-2 font-extrabold mont" style={{ fontSize: 24 }}>{titles[mode]}</h1>
       <p className="mt-1 text-[12px] text-neutral-500">{subs[mode]}</p>
 
-      {mode === "signup" && <input type="text" value={nome} onChange={e => setNome(e.target.value)} placeholder="Seu nome" autoComplete="name" required className={inp} />}
+      {mode === "signup" && <input type="text" value={nome} onChange={e => setNome(e.target.value)} placeholder="Nome completo" autoComplete="name" required className={inp} />}
+      {mode === "signup" && <input type="text" inputMode="numeric" value={cpf} onChange={e => setCpf(maskCPF(e.target.value))} placeholder="CPF (000.000.000-00)" autoComplete="off" maxLength={14} required className={inp} />}
+      {mode === "signup" && <input type="tel" value={tel} onChange={e => setTel(maskPhone(e.target.value))} placeholder="Telefone com DDD" autoComplete="tel" maxLength={15} required className={inp} />}
       {["login","signup","forgot"].includes(mode) && <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" autoComplete="username" required className={inp} />}
       {["login","signup","newpass"].includes(mode) && <input type="password" value={senha} onChange={e => setSenha(e.target.value)} placeholder={mode === "newpass" ? "Nova senha" : "Senha"} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={6} required className={inp} />}
       {(mode === "verify" || mode === "verifyrec") && <input type="text" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} placeholder="Código" required className={inp + " text-center tracking-[0.3em]"} />}
